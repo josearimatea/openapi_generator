@@ -8,7 +8,25 @@ dependencies = [
     "langgraph>=0.6.10",
     "pydantic>=2.12.5",
     "pyyaml>=6.0",
+    "python-dotenv>=1.1",
+    "langchain>=0.3",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.3",
+    "openai>=1.106",
+    "langchain-qdrant>=0.2",
+    "qdrant-client>=1.15",
+    "langchain-huggingface>=0.3",
+    "sentence-transformers>=5.2",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.1",
+    "ipykernel>=6.29",
+]
+
+[project.scripts]
+openapi-generator = "openapi_generator.main:main"
 
 [build-system]
 requires = ["setuptools>=77.0.3"]
