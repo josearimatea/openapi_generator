@@ -21,7 +21,7 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 
-def reflector_node(state: dict) -> Dict[str, Any]:
+def reflector_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
     logger.info("openapi_generator.reflector → STUB (not yet implemented)")
     return {
         "reflected_fragment": state.get("current_fragment", {}),

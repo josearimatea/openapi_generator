@@ -28,7 +28,7 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 
-def validator_node(state: dict) -> Dict[str, Any]:
+def validator_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
     logger.info("openapi_generator.validator → STUB (not yet implemented)")
     return {
         "validation_errors": [],

@@ -10,15 +10,27 @@ Per-operation loop with two conditional edges (mirrors openapi_rulesbank):
                               └────── retry op ──────────┘                │
                               └─────────────── next op ──────────────────┘
 
-The checkpointer is injected by the caller (e.g. a SqliteSaver from the
-chatbot service) so this package stays free of filesystem side effects at
-import time.
+Dependency injection (all optional):
+  - checkpointer: LangGraph saver chosen by the host application (SqliteSaver,
+    MemorySaver, ...). None → graph compiled without persistence.
+  - llm: a LangChain-compatible chat model. None → nodes fall back to
+    openapi_generator.config.llm_config.get_llm() (default ChatOpenAI).
+  - retriever: a callable(query, k, filters) → list[str] matching
+    openapi_generator.rag.retriever.Retriever. None → nodes fall back to
+    get_relevant_chunks (which itself degrades to [] if Qdrant/collection
+    is unavailable).
+
+Every node accepts (state, llm=None, retriever=None) so the build function
+can inject the same dependency pair uniformly. Nodes that don't need a
+dependency simply ignore the kwarg.
 """
 
-import logging
+from functools import partial
+from typing import Any, Callable, Optional
 
 from langgraph.graph import END, StateGraph
 
+from openapi_generator.config import get_logger
 from openapi_generator.graph.conditions import (
     should_next_op_or_end,
     should_retry_op_or_assemble,
@@ -31,24 +43,31 @@ from openapi_generator.nodes.planner import planner_node
 from openapi_generator.nodes.reflector import reflector_node
 from openapi_generator.nodes.validator import validator_node
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
-def build_openapi_gen_graph(checkpointer=None):
+def build_openapi_gen_graph(
+    checkpointer: Optional[Any] = None,
+    llm: Optional[Any] = None,
+    retriever: Optional[Callable] = None,
+):
     """Build and compile the OpenAPI generation graph.
 
     Args:
-        checkpointer: Optional LangGraph checkpointer (e.g. SqliteSaver,
-            MemorySaver). If None, the graph is compiled without persistence.
+        checkpointer: Optional LangGraph checkpointer. None → no persistence.
+        llm: Optional LangChain chat model. None → default ChatOpenAI from
+            settings (lazy).
+        retriever: Optional callable(query, k, filters) → list[str]. None →
+            default Qdrant-backed retriever that degrades to [] if unavailable.
     """
     graph = StateGraph(OpenAPIGenState)
 
-    graph.add_node("loader", loader_node)
-    graph.add_node("planner", planner_node)
-    graph.add_node("patcher", patcher_node)
-    graph.add_node("reflector", reflector_node)
-    graph.add_node("validator", validator_node)
-    graph.add_node("assembler", assembler_node)
+    graph.add_node("loader",    partial(loader_node,    llm=llm, retriever=retriever))
+    graph.add_node("planner",   partial(planner_node,   llm=llm, retriever=retriever))
+    graph.add_node("patcher",   partial(patcher_node,   llm=llm, retriever=retriever))
+    graph.add_node("reflector", partial(reflector_node, llm=llm, retriever=retriever))
+    graph.add_node("validator", partial(validator_node, llm=llm, retriever=retriever))
+    graph.add_node("assembler", partial(assembler_node, llm=llm, retriever=retriever))
 
     graph.set_entry_point("loader")
 

@@ -3,49 +3,89 @@ Loader — deterministic, no LLM.
 
 Responsibilities:
 1. Parse the 3GPP markdown spec into sections (one per ``## `` header).
-2. Initialize loop counters and the empty final OpenAPI skeleton.
+2. Seed final_openapi:
+     - if legacy_openapi was provided in the state → start from a deep copy
+       of it (preserves info / servers / paths / components).
+     - otherwise → start from an empty OpenAPI 3.0.3 skeleton, populating
+       info from rules_bank.metadata when available.
+3. Initialize loop counters and the empty accumulators consumed by the
+   per-operation loop.
 
-The rules_bank, legacy_openapi (optional) and openapi_target_path arrive
-already parsed in the initial state from the service layer — the Loader does
-not touch them, only forwards what's needed.
+Inputs (state):
+    spec_doc_path       (str)         — path to the 3GPP markdown
+    rules_bank          (dict|None)   — already-parsed rules bank JSON
+    legacy_openapi      (dict|None)   — already-parsed legacy OpenAPI (optional)
+    openapi_target_path (str)         — output YAML target (forwarded only)
 
-Inputs (state): spec_doc_path, rules_bank, legacy_openapi, openapi_target_path
-Outputs (state): parsed_spec_sections, current_op_idx=0, op_iteration_count=0,
-                 validated_fragments_by_op={}, validation_errors=[],
-                 final_openapi (empty skeleton).
+Outputs (state):
+    parsed_spec_sections      — list[{section_id, title, content}]
+    current_op_idx            = 0
+    op_iteration_count        = 0
+    validated_fragments_by_op = {}
+    validation_errors         = []
+    final_openapi             — deep copy of legacy OR seeded skeleton
 """
 
-import logging
-import re
+import copy
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+from openapi_generator.config import get_logger
+from openapi_generator.utils.parsers import parse_sections
 
-
-def _parse_sections(markdown_text: str) -> List[Dict[str, Any]]:
-    """
-    Split a 3GPP markdown spec on ``## `` headers.
-
-    Returns a list of {section_id (int as str), title, content}.
-    Mirrors the shape used by openapi_rulesbank so section_id values from the
-    rules_bank line up with these indices.
-    """
-    pattern = re.compile(r"^## (.+)$", re.MULTILINE)
-    matches = list(pattern.finditer(markdown_text))
-    sections: List[Dict[str, Any]] = []
-    for idx, m in enumerate(matches):
-        start = m.end()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(markdown_text)
-        sections.append({
-            "section_id": str(idx),
-            "title": m.group(1).strip(),
-            "content": markdown_text[start:end].strip(),
-        })
-    return sections
+logger = get_logger(__name__)
 
 
-def loader_node(state: dict) -> Dict[str, Any]:
+def _empty_skeleton() -> Dict[str, Any]:
+    return {
+        "openapi": "3.0.3",
+        "info": {},
+        "paths": {},
+        "components": {"schemas": {}},
+    }
+
+
+def _info_from_rules_bank(rules_bank: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build a minimal info block from rules_bank metadata. Empty dict if none."""
+    if not rules_bank:
+        return {}
+    meta = rules_bank.get("metadata") or {}
+    info: Dict[str, Any] = {}
+    source = meta.get("source_document")
+    if source:
+        # Use the spec file stem as a placeholder title — Patcher can refine.
+        info["title"] = f"OpenAPI generated from {Path(source).stem}"
+    if meta.get("generated_at"):
+        info["x-rules-bank-generated-at"] = meta["generated_at"]
+    if meta.get("model"):
+        info["x-rules-bank-model"] = meta["model"]
+    return info
+
+
+def _seed_final_openapi(
+    legacy_openapi: Optional[Dict[str, Any]],
+    rules_bank: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Decide whether to start from the legacy spec or an empty skeleton."""
+    if legacy_openapi:
+        logger.info(
+            "Loader → seeding final_openapi from legacy "
+            f"({len(legacy_openapi.get('paths') or {})} path(s), "
+            f"{len(((legacy_openapi.get('components') or {}).get('schemas') or {}))} schema(s))"
+        )
+        return copy.deepcopy(legacy_openapi)
+
+    skeleton = _empty_skeleton()
+    skeleton["info"] = _info_from_rules_bank(rules_bank)
+    logger.info(
+        "Loader → no legacy provided; starting from empty skeleton "
+        f"(info from rules_bank: {bool(skeleton['info'])})"
+    )
+    return skeleton
+
+
+def loader_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
+    # llm, retriever: unused (deterministic node) — accepted for uniform DI.
     spec_path = state.get("spec_doc_path", "")
     parsed_sections: List[Dict[str, Any]] = []
 
@@ -54,9 +94,10 @@ def loader_node(state: dict) -> Dict[str, Any]:
         if p.exists():
             try:
                 text = p.read_text(encoding="utf-8")
-                parsed_sections = _parse_sections(text)
+                parsed_sections, excluded = parse_sections(text)
                 logger.info(
-                    f"Loader → parsed {len(parsed_sections)} sections from {p.name}"
+                    f"Loader → parsed {len(parsed_sections)} sections from {p.name} "
+                    f"(excluded {len(excluded)} symbolic-title section(s))"
                 )
             except Exception as e:
                 logger.error(f"Loader → failed to read spec at {p}: {e}", exc_info=True)
@@ -65,16 +106,20 @@ def loader_node(state: dict) -> Dict[str, Any]:
     else:
         logger.warning("Loader → no spec_doc_path provided")
 
+    rules_bank = state.get("rules_bank")
+    legacy_openapi = state.get("legacy_openapi")
+
+    rules_count = len((rules_bank or {}).get("rules") or [])
+    logger.info(
+        f"Loader → rules_bank: {rules_count} rule(s); "
+        f"legacy_openapi: {'present' if legacy_openapi else 'absent'}"
+    )
+
     return {
         "parsed_spec_sections": parsed_sections,
         "current_op_idx": 0,
         "op_iteration_count": 0,
         "validated_fragments_by_op": {},
         "validation_errors": [],
-        "final_openapi": {
-            "openapi": "3.0.3",
-            "info": {},
-            "paths": {},
-            "components": {"schemas": {}},
-        },
+        "final_openapi": _seed_final_openapi(legacy_openapi, rules_bank),
     }
