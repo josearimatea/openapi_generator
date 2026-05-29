@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field
 
-Action = Literal["create", "update", "keep"]
+Action = Literal["create", "update", "keep", "discard"]
 Priority = Literal["high", "medium", "low"]
 
 
@@ -34,13 +34,15 @@ class TargetOperation(BaseModel):
     )
     action: Action = Field(
         description=(
-            "What the Patcher must do with this (path, method):\n"
-            "  'create' — operation absent from the legacy OpenAPI; build "
-            "from scratch using the rules and the 3GPP spec.\n"
-            "  'update' — operation exists in the legacy but rules require "
-            "changes (new parameters, schema fields, responses, etc.).\n"
-            "  'keep'   — operation exists in the legacy and the rules "
-            "confirm it as-is; no LLM work needed, just carry it forward."
+            "What the Patcher (or Assembler) must do with this (path, method):\n"
+            "  'create'  — operation absent from the legacy; build from scratch.\n"
+            "  'update'  — operation exists in the legacy but rules/spec require "
+            "changes.\n"
+            "  'keep'    — operation exists in the legacy and rules/spec confirm "
+            "it as-is.\n"
+            "  'discard' — operation exists in the legacy but rules/spec show "
+            "it must be removed (e.g. deprecated in Rel-18). Assembler drops "
+            "it from the final document; Patcher is not called."
         )
     )
     source_rule_ids: List[int] = Field(
@@ -90,6 +92,14 @@ class ExtractionPlan(BaseModel):
             "should appear in at least one operation's source_rule_ids."
         ),
     )
+    probable_gaps: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Debug aid: spec section titles (or rule descriptions) that the "
+            "Planner could not associate with any TargetOperation. Useful to "
+            "spot 3GPP requirements that may have been dropped."
+        ),
+    )
 
 
 class OperationFragment(BaseModel):
@@ -110,3 +120,123 @@ class ValidationVerdict(BaseModel):
     verdict: Literal["valid", "correction", "split", "discard"]
     instruction: str = ""
     new_missing_rules: List[str] = Field(default_factory=list)
+
+
+class PlannerPass1Verdict(BaseModel):
+    """
+    Verdict returned by the Planner Pass 1 (per legacy operation).
+
+    The Planner looks at a single legacy (path, method), the candidate rules
+    pre-filtered for it, plus 3GPP and OpenAPI-reference RAG chunks, and
+    decides what to do with it in the final document.
+    """
+
+    action: Action = Field(
+        description=(
+            "'keep' if the legacy fragment already satisfies every relevant "
+            "rule and the spec confirms it; 'update' if rules/spec require "
+            "changes on top of the legacy; 'discard' if rules/spec indicate "
+            "the operation must be removed (deprecated, replaced)."
+        )
+    )
+    source_rule_ids: List[int] = Field(
+        default_factory=list,
+        description=(
+            "Subset of the candidate rule indices that DO apply to this "
+            "operation. Indices from the candidate table only; never invent."
+        ),
+    )
+    rationale: str = Field(
+        default="",
+        description="One short sentence justifying the chosen action.",
+    )
+
+
+class PlannerPass2Op(BaseModel):
+    """
+    Pass 2 verdict for ONE group of residual rules.
+
+    Two destinations are allowed:
+      - 'new'    : the rules describe an operation that did NOT exist in the
+                   legacy. The Planner emits a new TargetOperation with
+                   action='create' using path/method/priority below.
+      - 'attach' : the rules actually belong to an operation already in the
+                   plan (typically a Pass-1 entry from the legacy). The
+                   Planner appends `source_rule_ids` to that existing
+                   operation; `attach_to_index` points at it.
+    """
+
+    destination: Literal["new", "attach"] = Field(
+        description=(
+            "'new' → emit a new TargetOperation with action='create'. "
+            "'attach' → append source_rule_ids to operations_plan[attach_to_index]."
+        )
+    )
+    path: str = Field(
+        default="",
+        description="Required when destination='new'; ignored otherwise.",
+    )
+    method: Literal["get", "put", "post", "delete", "patch", "head", "options", ""] = Field(
+        default="",
+        description="Required when destination='new'; ignored otherwise.",
+    )
+    attach_to_index: int = Field(
+        default=-1,
+        description=(
+            "Required when destination='attach'. Zero-based index into the "
+            "operations_plan list shown to the LLM."
+        ),
+    )
+    source_rule_ids: List[int] = Field(
+        default_factory=list,
+        description=(
+            "Subset of the candidate rule indices that truly apply to the "
+            "chosen destination."
+        ),
+    )
+    priority: Priority = Field(default="medium")
+    rationale: str = Field(default="")
+
+
+class PlannerSchemaAttachment(BaseModel):
+    """
+    Pass 2 Phase C verdict: which operations in the current plan should
+    receive the rule indices that describe properties of one schema.
+
+    The LLM sees the schema name, its grouped schema_property rules, and
+    the current plan. It returns the indices of operations whose request
+    body / response / parameters use that schema.
+    """
+
+    attach_to_indices: List[int] = Field(
+        default_factory=list,
+        description=(
+            "Zero-based indices into operations_plan whose operations use "
+            "this schema (e.g. via $ref in requestBody or responses). "
+            "Empty list means no operation in the plan uses the schema — "
+            "Planner records every rule index as a probable gap."
+        ),
+    )
+    rationale: str = Field(default="")
+
+
+class PlannerUngroupedMapping(BaseModel):
+    """
+    Pass 2 epilogue: bulk-mapping for rules whose openapi_object did not
+    expose a (path, method) so the deterministic grouping could not place
+    them. One LLM call receives all ungrouped rules + the current plan and
+    decides, per rule, the best attachment.
+    """
+
+    class Entry(BaseModel):
+        rule_index: int = Field(description="Ungrouped rule index from the input list.")
+        attach_to_index: int = Field(
+            default=-1,
+            description=(
+                "Operation index in the plan to attach this rule to. Use -1 "
+                "when no operation is a plausible fit (Planner records it as "
+                "a probable gap)."
+            ),
+        )
+
+    assignments: List[Entry] = Field(default_factory=list)

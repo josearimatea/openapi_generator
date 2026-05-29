@@ -1,108 +1,245 @@
 """
-Prompt template for the Planner node.
+Prompt templates for the Planner node.
 
-The Planner takes a flat list of extracted rules (from rules_bank) and an
-optional legacy OpenAPI document, and produces an ordered list of
-TargetOperation entries — the unit of work for the per-operation loop.
+The Planner runs in TWO passes:
 
-Inputs interpolated into the prompt:
-    rules_summary    — compact table of rules indexed by their position in
-                       rules_bank["rules"]; the position is the source_rule_id
-                       the Planner must reference.
-    legacy_summary   — bullet list of (path, method) pairs already present in
-                       the legacy OpenAPI, with a short hint per path; empty
-                       string when no legacy was provided.
-    document_summary — one-line context about what API surface this run covers.
+  Pass 1 — Polish the legacy
+    For each (path, method) already present in legacy_openapi, ask the LLM
+    to decide keep / update / discard based on:
+      - the legacy fragment itself
+      - the candidate rules pre-filtered deterministically from rules_bank
+      - 3GPP spec chunks retrieved via RAG
+      - OpenAPI 3.0 reference chunks retrieved via RAG
+    The LLM returns a PlannerPass1Verdict with the chosen action and the
+    rule indices that actually apply.
+
+  Pass 2 — Create new operations from leftover rules
+    Rules not consumed by Pass 1 are grouped deterministically by their
+    inferred (path, method) (from openapi_mapping.openapi_object). For each
+    group, the LLM confirms / refines a new TargetOperation with action='create'
+    using the same RAG support.
+
+Inputs interpolated:
+  Pass 1:
+    op_label            — "GET /{className}={id}"
+    legacy_fragment     — pretty-printed YAML fragment for the op
+    candidate_rules     — rules whose openapi_object touches the same path/schema
+    spec_rag            — 3GPP chunks (similarity_search)
+    openapi_reference   — OpenAPI 3.0 chunks (similarity_search)
+
+  Pass 2:
+    op_label            — "PUT /subscriptions"
+    grouped_rules       — residual rules sharing this (path, method)
+    spec_rag            — 3GPP chunks
+    openapi_reference   — OpenAPI 3.0 chunks
 """
 
 from langchain_core.prompts import ChatPromptTemplate
 
-_SYSTEM = """\
+
+# ── PASS 1 ───────────────────────────────────────────────────────────────────
+
+_PASS1_SYSTEM = """\
 You are an expert in 3GPP technical specifications and OpenAPI 3.0 design.
 
-Your task is to plan the generation of an OpenAPI document. You are given:
-  1. A list of RULES already extracted from the 3GPP spec — each rule
-     describes one OpenAPI artifact (an HTTP method, a path parameter, a
-     query parameter, a request body, a response, a schema property, or a
-     security scheme). Each rule has an index — that index is what you must
-     reference in `source_rule_ids`.
-  2. (Optional) A summary of the LEGACY OpenAPI document. The legacy is the
-     starting point: operations already present there should be preserved
-     unless the rules require changes.
+You are reviewing ONE operation that already exists in a LEGACY OpenAPI
+document. Your job is to decide what happens to this operation in the new
+document the pipeline is building.
 
-Produce an `ExtractionPlan` listing every OpenAPI operation that must appear
-in the final document. One operation = one (path, method) pair.
+Inputs you receive (in priority order):
+  1. LEGACY FRAGMENT  — the starting point. Treat as authoritative unless the
+                        rules or the spec contradict it.
+  2. CANDIDATE RULES  — rules from rules_bank that were deterministically
+                        pre-filtered to touch this (path, method). Each rule
+                        has an INDEX you must reference. Not every candidate
+                        truly applies; you decide which do.
+  3. 3GPP SPEC CHUNKS — supporting passages retrieved via RAG to confirm
+                        whether the legacy is still aligned with the spec.
+  4. OPENAPI REFERENCE — authoritative OpenAPI 3.0 excerpts for syntax /
+                         keyword validation.
 
-For each operation, decide the `action`:
-  • 'create' — operation absent from the legacy, must be built from scratch
-               using the rules.
-  • 'update' — operation present in the legacy AND rules require changes
-               (new parameters, response codes, schema fields, etc.).
-  • 'keep'   — operation present in the legacy and rules confirm it as-is;
-               the Patcher just carries it forward without modifying.
+Decide ONE action:
+  • 'keep'    — legacy is fine as-is; every relevant rule is already satisfied
+                and nothing in the spec demands changes.
+  • 'update'  — legacy is mostly correct but at least one rule or spec passage
+                requires changes (new param, new response, schema tweak…).
+  • 'discard' — legacy operation must be removed (deprecated, replaced by a
+                different operation, contradicted by the spec).
 
-For each operation, list every rule index that grounds it in
-`source_rule_ids`. A rule maps to an operation when its
-`openapi_mapping.openapi_object` references the same path or schema as the
-operation. Several rules may ground the same operation (one for the HTTP
-method, one for each parameter, one for each response, one per schema
-property of the request/response body, etc.).
+Also list `source_rule_ids` — the subset of candidate rule indices that
+ACTUALLY apply. Empty list is fine when 'keep' and no rule is needed.
 
-MERGING RULES THAT SHARE (path, method):
-  OpenAPI allows only ONE entry per (path, method) — you cannot have two
-  `put` blocks under the same path. 3GPP, however, often maps several IS
-  operations to the same HTTP verb on the same path (e.g. `createMOI` and
-  `modifyMOIAttributes` both use PUT on /{{className}}={{id}}: PUT creates
-  if the resource does not exist, replaces it if it does).
-
-  When you see multiple rules that resolve to the same (path, method) —
-  even if their `openapi_object` strings differ slightly (one may include
-  the full server prefix, another only the relative path) and their
-  rule_type/source_name differ — emit ONE TargetOperation that covers all
-  of them. Put EVERY relevant rule index into `source_rule_ids`. Mention
-  in `rationale` that this single OpenAPI operation serves multiple IS
-  operations (list their names).
-
-ORDERING RULES:
-  • Operations whose request/response schemas are referenced by other
-    operations come first (so $refs resolve as the Patcher builds the
-    document incrementally).
-  • Within the same dependency level: 'high' priority before 'medium'
-    before 'low'.
-  • No duplicates: each (path, method) appears at most ONCE — never twice.
-  • Cover every rule: every index from the rules table should appear in at
-    least one operation's `source_rule_ids`. If a rule does not fit any
-    operation, surface it by attaching it to the most plausible one and
-    note that in `rationale`.
-
-PRIORITY:
-  • 'high'   — schemas reused across operations (e.g. shared error
-               response, base resource models), or core CRUD entry points.
-  • 'medium' — standard CRUD operations on individual resources.
-  • 'low'   — auxiliary endpoints (notifications, subscriptions, status,
-               etc.).
+NEVER invent rule indices. NEVER change path or method. Only the action
+and rule association are yours to decide.
 """
 
-_USER = """\
-DOCUMENT SUMMARY:
-{document_summary}
+_PASS1_USER = """\
+OPERATION UNDER REVIEW: {op_label}
 
-LEGACY OPENAPI (existing (path, method) pairs):
-{legacy_summary}
+LEGACY FRAGMENT (authoritative baseline):
+{legacy_fragment}
 
-RULES TABLE (each row is one rule):
-{rules_summary}
+CANDIDATE RULES (already filtered for this operation; pick the ones that apply):
+{candidate_rules}
 
-Produce the ExtractionPlan now. Remember:
-  - `source_rule_ids` values MUST come from the leftmost `index` column of
-    the rules table above. The table tells you the exact valid range
-    (e.g. 0..239). Never invent indices, never use any other number you
-    might see in the rule text or openapi_object.
-  - Cover every rule index at least once across all operations.
-  - Order operations so referenced schemas come before referencing ones.
+3GPP SPEC CHUNKS (use to confirm or contradict the legacy):
+{spec_rag}
+
+OPENAPI 3.0 REFERENCE CHUNKS (syntax / keyword authority):
+{openapi_reference}
+
+Produce the PlannerPass1Verdict now. Remember:
+  - source_rule_ids must be a subset of the candidate indices shown above.
+  - Choose 'discard' only when the legacy operation should NOT appear in the
+    final document at all.
 """
 
-planner_prompt = ChatPromptTemplate.from_messages([
-    ("system", _SYSTEM),
-    ("human", _USER),
+pass1_prompt = ChatPromptTemplate.from_messages([
+    ("system", _PASS1_SYSTEM),
+    ("human", _PASS1_USER),
+])
+
+
+# ── PASS 2 — per group ───────────────────────────────────────────────────────
+
+_PASS2_SYSTEM = """\
+You are an expert in 3GPP technical specifications and OpenAPI 3.0 design.
+
+A deterministic step already grouped residual rules (rules NOT consumed by
+Pass 1) by their inferred (path, method). You receive ONE such group and
+decide where its rules belong in the final plan.
+
+Two destinations are possible:
+
+  • 'new'    — the rules describe an operation that does NOT yet exist
+               in the plan. Emit a NEW TargetOperation (action='create')
+               with the candidate path/method, refining source_rule_ids
+               to the ones that genuinely apply.
+
+  • 'attach' — the rules actually belong to an operation ALREADY in the
+               plan (typically a Pass-1 legacy operation that the
+               deterministic filter missed). Choose its index in the
+               EXISTING PLAN list shown below; the Planner will append
+               source_rule_ids to that operation.
+
+Inputs:
+  1. CANDIDATE (path, method) — inferred from the rules' openapi_mapping.
+  2. GROUPED RULES            — every residual rule pointing here.
+  3. EXISTING PLAN            — operations already produced by Pass 1
+                                (and earlier Pass 2 groups). Use their
+                                indices for 'attach'.
+  4. 3GPP SPEC CHUNKS         — supporting RAG passages.
+  5. OPENAPI REFERENCE        — OpenAPI 3.0 RAG excerpts.
+
+Rules:
+  - source_rule_ids must be a subset of the grouped rule indices.
+  - For 'new': path/method should mirror the candidate unless the rules
+    clearly disagree (mention it in rationale).
+  - For 'attach': set attach_to_index to a valid plan index; ignore
+    path/method/priority.
+  - Never invent rule indices.
+"""
+
+_PASS2_USER = """\
+CANDIDATE (path, method): {op_label}
+
+GROUPED RULES (residual rules attributed to this candidate):
+{grouped_rules}
+
+EXISTING PLAN (operations already chosen — use their index for 'attach'):
+{existing_plan}
+
+3GPP SPEC CHUNKS:
+{spec_rag}
+
+OPENAPI 3.0 REFERENCE CHUNKS:
+{openapi_reference}
+
+Produce the PlannerPass2Op now.
+"""
+
+pass2_prompt = ChatPromptTemplate.from_messages([
+    ("system", _PASS2_SYSTEM),
+    ("human", _PASS2_USER),
+])
+
+
+# ── PASS 2 — schema-property group ───────────────────────────────────────────
+
+_PASS2_SCHEMA_SYSTEM = """\
+You are an expert in 3GPP technical specifications and OpenAPI 3.0 design.
+
+You receive one schema name (under components.schemas) and every residual
+rule (rule_type='schema_property') that describes its properties. None of
+these rules is tied to a (path, method) directly — they describe a
+reusable shape.
+
+Your task is to point out WHICH operations in the CURRENT PLAN use this
+schema (typically referenced via $ref under requestBody, responses, or
+parameters). The Planner will append the rule indices to every operation
+you pick.
+
+Rules:
+  - Use ONLY indices that appear in the CURRENT PLAN list.
+  - Return an empty list if no operation plausibly uses the schema; the
+    Planner records the rules as gaps.
+  - Do NOT invent indices.
+"""
+
+_PASS2_SCHEMA_USER = """\
+SCHEMA NAME: {schema_name}
+
+SCHEMA-PROPERTY RULES (all describe properties of {schema_name}):
+{schema_rules}
+
+CURRENT PLAN (use these indices for attach_to_indices):
+{existing_plan}
+
+OPENAPI 3.0 REFERENCE CHUNKS (syntax authority):
+{openapi_reference}
+
+Produce the PlannerSchemaAttachment now.
+"""
+
+pass2_schema_prompt = ChatPromptTemplate.from_messages([
+    ("system", _PASS2_SCHEMA_SYSTEM),
+    ("human", _PASS2_SCHEMA_USER),
+])
+
+
+# ── PASS 2 — ungrouped epilogue ──────────────────────────────────────────────
+
+_PASS2_UNGROUPED_SYSTEM = """\
+You are an expert in 3GPP technical specifications and OpenAPI 3.0 design.
+
+The pipeline has rules whose openapi_object did NOT expose a (path, method)
+(typically schema-only rules under components/schemas/<Name>). They were
+not handled by Pass 1 (the legacy review) nor by the Pass 2 grouping.
+
+Your task is to attach each ungrouped rule to the operation in the
+CURRENT PLAN whose request body / response / parameters most plausibly
+reference the schema or topic the rule describes.
+
+For every rule, return an Entry:
+  - rule_index       — the rule's index from the UNGROUPED RULES list.
+  - attach_to_index  — index in the CURRENT PLAN to attach the rule to,
+                       or -1 if no operation is a reasonable fit (the
+                       Planner will record the rule as a probable gap).
+
+Never invent rule indices. Never invent plan indices.
+"""
+
+_PASS2_UNGROUPED_USER = """\
+UNGROUPED RULES (need a home):
+{ungrouped_rules}
+
+CURRENT PLAN (use these indices for attach_to_index):
+{existing_plan}
+
+Produce the PlannerUngroupedMapping now. Cover every ungrouped rule.
+"""
+
+pass2_ungrouped_prompt = ChatPromptTemplate.from_messages([
+    ("system", _PASS2_UNGROUPED_SYSTEM),
+    ("human", _PASS2_UNGROUPED_USER),
 ])
