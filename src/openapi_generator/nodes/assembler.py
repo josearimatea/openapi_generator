@@ -140,23 +140,41 @@ def assembler_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         )
         fragment = _force_include_annotation(fragment, correction_errors)
 
-    # ── 2. Deep-merge ─────────────────────────────────────────────
+    # ── 2. Deep-merge (or remove on discard) ─────────────────────
     final_openapi = copy.deepcopy(state.get("final_openapi") or {})
     final_openapi.setdefault("paths", {})
     final_openapi.setdefault("components", {}).setdefault("schemas", {})
 
-    frag_paths = fragment.get("paths") or {}
-    frag_components = fragment.get("components") or {}
-    if frag_paths:
-        _deep_merge(final_openapi["paths"], frag_paths, "paths")
-    if frag_components:
-        _deep_merge(final_openapi["components"], frag_components, "components")
+    frag_paths: Dict[str, Any] = {}
+    frag_components: Dict[str, Any] = {}
 
-    logger.info(
-        f"Assembler → merged {op_key}: "
-        f"+{len(frag_paths)} path block(s), "
-        f"+{len((frag_components.get('schemas') or {}))} schema(s)"
-    )
+    if op.get("action") == "discard":
+        op_path = op.get("path", "")
+        op_method = (op.get("method") or "").lower()
+        path_item = (final_openapi.get("paths") or {}).get(op_path)
+        if isinstance(path_item, dict) and op_method in path_item:
+            path_item.pop(op_method, None)
+            if not path_item:
+                final_openapi["paths"].pop(op_path, None)
+            logger.info(f"Assembler → discarded {op_key} from final_openapi")
+        else:
+            logger.warning(
+                f"Assembler → discard requested for {op_key} but it was "
+                "not present in final_openapi (already removed?)"
+            )
+    else:
+        frag_paths = fragment.get("paths") or {}
+        frag_components = fragment.get("components") or {}
+        if frag_paths:
+            _deep_merge(final_openapi["paths"], frag_paths, "paths")
+        if frag_components:
+            _deep_merge(final_openapi["components"], frag_components, "components")
+
+        logger.info(
+            f"Assembler → merged {op_key}: "
+            f"+{len(frag_paths)} path block(s), "
+            f"+{len((frag_components.get('schemas') or {}))} schema(s)"
+        )
 
     # ── 3. Track accepted fragment ────────────────────────────────
     validated = dict(state.get("validated_fragments_by_op") or {})

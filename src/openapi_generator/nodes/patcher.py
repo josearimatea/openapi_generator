@@ -1,16 +1,28 @@
 """
-Patcher — 1 LLM call per operation, RAG optional.
+Patcher — up to 1 LLM call per operation, 2 RAGs (optional).
 
 For the current TargetOperation in operations_plan[current_op_idx]:
-  1. Collect the rules grounding it (rules_bank["rules"][i] for i in
-     target_op.source_rule_ids).
-  2. Pull the legacy fragment for this (path, method) when action is
-     'update' or 'keep'.
-  3. (Optional) Query the 3GPP RAG collection for supporting context.
-  4. On retry (op_iteration_count > 0): feed the Validator's per-op
-     feedback (validator_op_reflection + correction errors) back into
-     the prompt as a CORRECTION TASK.
-  5. Call the LLM with structured output (OperationFragment).
+
+  - Early-return for action in {'keep', 'discard'} → no LLM, no RAG. The
+    legacy fragment already in final_openapi is kept (the Assembler will
+    pop it when action='discard'). Returns an empty fragment.
+
+  Otherwise (action in {'create', 'update'}):
+    1. Collect the applicable rules from rules_bank["rules"] using the
+       indices in target_op.source_rule_ids (assembled by the Planner).
+    2. Pull the legacy fragment for this (path, method) when action is
+       'update' (used as the baseline the LLM modifies).
+    3. Query the 3GPP RAG collection for spec context (optional —
+       degrades to "" if Qdrant or the collection is missing).
+    4. Query the OpenAPI 3.0 reference RAG (search_openapi_reference)
+       for authoritative spec excerpts (same graceful degradation).
+    5. On retry (op_iteration_count > 0): inject the Validator's per-op
+       feedback (validator_op_reflection + correction errors) as a
+       CORRECTION TASK section in the prompt.
+    6. Call the LLM with structured output (OperationFragment,
+       method='function_calling' so open-ended paths/schemas are accepted).
+    7. Re-anchor path/method on the output (the LLM occasionally renames
+       them; the Patcher overwrites with the target values).
 
 State reads:
     operations_plan, current_op_idx, op_iteration_count,
@@ -18,8 +30,15 @@ State reads:
     validation_errors, validator_op_reflection
 
 State writes:
-    current_fragment        — OperationFragment dict
+    current_fragment        — OperationFragment dict (empty for keep/discard)
     op_iteration_count      — incremented by 1
+
+LLM/Retriever injection:
+    llm        — passed via build_openapi_gen_graph(llm=...); falls back
+                 to config.llm_config.get_llm() when None.
+    retriever  — 3GPP spec RAG callable; falls back to
+                 rag.retriever.get_relevant_chunks. OpenAPI reference RAG
+                 is always tools.rag_tools.search_openapi_reference.
 """
 
 import copy
@@ -190,6 +209,15 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         f"Patcher → op {idx + 1}/{len(plan)} ({op_label}) "
         f"action={action} attempt={iteration + 1}"
     )
+
+    # Early-return: 'keep' is a no-op (legacy already in final_openapi via Loader),
+    # 'discard' is handled by the Assembler. In both cases no LLM call is needed.
+    if action in ("keep", "discard"):
+        logger.info(f"Patcher → skipping LLM for action={action} on {op_label}")
+        return {
+            "current_fragment": _empty_fragment(target_op),
+            "op_iteration_count": iteration + 1,
+        }
 
     rules_bank = state.get("rules_bank") or {}
     all_rules: List[Dict[str, Any]] = rules_bank.get("rules") or []
