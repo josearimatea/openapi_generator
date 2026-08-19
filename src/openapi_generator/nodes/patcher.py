@@ -9,7 +9,10 @@ For the current TargetOperation in operations_plan[current_op_idx]:
 
   Otherwise (action in {'create', 'update'}):
     1. Collect the applicable rules from rules_bank["rules"] using the
-       indices in target_op.source_rule_ids (assembled by the Planner).
+       indices in target_op.source_rule_ids (assembled by the Planner),
+       gating each one through _rule_verdict: rules the bank's Validator
+       rejected are dropped or marked DISPUTED depending on what the
+       Reflector thought of them.
     2. Pull the legacy fragment for this (path, method) when action is
        'update' (used as the baseline the LLM modifies).
     3. Query the 3GPP RAG collection for spec context (optional —
@@ -43,11 +46,12 @@ LLM/Retriever injection:
 
 import copy
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
 from openapi_generator.config import get_logger
+from openapi_generator.config.settings import RULE_RESCUE_CONFIDENCE
 from openapi_generator.prompts.patcher_prompts import patcher_prompt
 from openapi_generator.schemas.operation import OperationFragment
 
@@ -64,26 +68,91 @@ def _empty_fragment(target_op: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _build_rules_block(rules: List[Dict[str, Any]], indices: List[int]) -> str:
-    """Render the applicable rules as readable lines for the prompt."""
+def _rule_verdict(rule: Dict[str, Any]) -> Tuple[str, str]:
+    """Decide how one rules_bank rule may be used, returning (verdict, objection).
+
+    A rule the bank's Validator approved is authoritative — nothing to decide.
+    A rule it rejected was force-included by the bank's Builder at MAX_ITERATIONS,
+    so the content is still there; the Reflector's own assessment breaks the tie:
+
+      - the Reflector already wanted it gone (discard_suggestion), or flagged it
+        while scoring it below RULE_RESCUE_CONFIDENCE          → 'drop'
+      - the Reflector stands behind it (not flagged, or confident) → 'review'
+
+    'drop' never reaches the prompt. 'review' does, annotated with the Validator's
+    objection and the Reflector's reasoning, so the LLM arbitrates on the same
+    evidence rather than treating a disputed rule as fact.
+
+    The bank does not persist `error_type` on a force-included rule — its Builder
+    folds it into `validation_notes` as "Force-included at max attempts.
+    Failed: <instruction>". `reflection_confidence` may be null (newer extractor
+    models leave it unset); absence means "not scored", not zero, so it never on
+    its own condemns a rule.
+    """
+    if rule.get("validation_passed", True):
+        return "ok", ""
+
+    notes = (rule.get("validation_notes") or "").strip()
+    objection = notes.split("Failed:", 1)[1].strip() if "Failed:" in notes else notes
+    confidence = rule.get("reflection_confidence")
+    scored_low = (
+        isinstance(confidence, (int, float)) and confidence < RULE_RESCUE_CONFIDENCE
+    )
+
+    if rule.get("discard_suggestion") or (rule.get("reflection_flagged") and scored_low):
+        return "drop", objection
+    return "review", objection
+
+
+def _build_rules_block(
+    rules: List[Dict[str, Any]],
+    indices: List[int],
+) -> Tuple[str, Dict[str, List[int]]]:
+    """Render the applicable rules for the prompt, gated by their bank verdict.
+
+    Returns (block, buckets); buckets maps verdict → rule indices so the caller
+    can log what was used and what was withheld.
+    """
+    buckets: Dict[str, List[int]] = {"ok": [], "review": [], "drop": []}
     if not indices:
-        return "(no rules attached to this operation)"
+        return "(no rules attached to this operation)", buckets
+
     lines: List[str] = []
     for i in indices:
         if not 0 <= i < len(rules):
             logger.warning(f"Patcher → rule index {i} out of range; skipping")
             continue
         r = rules[i]
+        verdict, objection = _rule_verdict(r)
+        buckets[verdict].append(i)
+        if verdict == "drop":
+            continue
+
         mapping = r.get("openapi_mapping") or {}
-        lines.append(
+        confidence = r.get("reflection_confidence")
+        entry = [
             f"- [{i}] type={r.get('rule_type', '?')} "
-            f"source={r.get('source_name', '?')!r}\n"
-            f"      text       : {r.get('rule_text', '?')}\n"
+            f"source={r.get('source_name', '?')!r}",
+            f"      status     : {'VALIDATED' if verdict == 'ok' else 'DISPUTED'}"
+            + (f" (reflector confidence={confidence:.2f})"
+               if isinstance(confidence, (int, float)) else ""),
+            f"      text       : {r.get('rule_text', '?')}",
             f"      maps to    : object={mapping.get('openapi_object', '?')} "
             f"field={mapping.get('openapi_field', '?')} "
-            f"value={mapping.get('openapi_value', '?')!r}"
-        )
-    return "\n".join(lines) if lines else "(no resolvable rule indices)"
+            f"value={mapping.get('openapi_value', '?')!r}",
+        ]
+        if verdict == "review":
+            reasoning = " ".join((r.get("reflection_reasoning") or "").split())
+            entry.append(f"      objection  : {objection}")
+            if reasoning:
+                entry.append(f"      defence    : {reasoning[:600]}")
+            entry.append(
+                "      -> Weigh the objection against the defence and the spec "
+                "context. Apply this rule only if it holds up; otherwise omit it."
+            )
+        lines.append("\n".join(entry))
+
+    return ("\n".join(lines) if lines else "(no usable rule for this operation)"), buckets
 
 
 def _legacy_fragment_for(
@@ -164,6 +233,70 @@ def _build_correction_task(
     return "\n".join(lines)
 
 
+def _strip_ref_siblings(node: Any, _at: str = "") -> List[str]:
+    """Drop keys sitting beside a `$ref`, in place. Returns the paths cleaned.
+
+    OpenAPI 3.0 defines `$ref` as exclusive: a parser resolves the reference and
+    ignores every sibling key, so `description`/`type`/`example` written next to
+    one are silently lost. The Patcher prompt forbids them, but the guarantee is
+    cheap to enforce here and keeps an LLM slip from reaching the document.
+    """
+    cleaned: List[str] = []
+    if isinstance(node, dict):
+        if "$ref" in node and len(node) > 1:
+            for key in [k for k in node if k != "$ref"]:
+                node.pop(key)
+                cleaned.append(f"{_at}.{key}" if _at else key)
+        for key, value in node.items():
+            cleaned.extend(_strip_ref_siblings(value, f"{_at}.{key}" if _at else str(key)))
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            cleaned.extend(_strip_ref_siblings(value, f"{_at}[{i}]"))
+    return cleaned
+
+
+# Signals in a rule → the OpenAPI 3.0 section that governs what it produces.
+# Keys are the reference document's own headings, which is what the collection
+# is indexed on.
+_CONSTRUCT_BY_SIGNAL = {
+    "Reference Object $ref": lambda field, value, rtype: "$ref" in value,
+    "Schema Object composition allOf oneOf anyOf":
+        lambda field, value, rtype: field in ("allOf", "oneOf", "anyOf"),
+    "Responses Object status codes content":
+        lambda field, value, rtype: rtype == "response",
+    "Request Body Object content":
+        lambda field, value, rtype: rtype == "request_body",
+    "Parameter Object in path query":
+        lambda field, value, rtype: rtype in ("path_parameter", "query_parameter"),
+}
+
+
+def _openapi_reference_query(rules: List[Dict[str, Any]], indices: List[int]) -> str:
+    """Name the OpenAPI constructs this fragment will use, for the reference RAG.
+
+    The two RAGs need different questions. The 3GPP collection is asked in the
+    specification's own vocabulary ("POST /notificationSink —
+    notifyThresholdCrossing"). The OpenAPI-reference collection holds the
+    OpenAPI 3.0 document, where those words never occur — asking it the same
+    question returns whatever sits nearby rather than the sections that govern
+    what we are about to write. The rules already say which constructs the
+    fragment will contain, so we ask for those by name.
+    """
+    wanted = []
+    for i in indices:
+        if not 0 <= i < len(rules):
+            continue
+        mapping = rules[i].get("openapi_mapping") or {}
+        args = (
+            str(mapping.get("openapi_field") or ""),
+            str(mapping.get("openapi_value") or ""),
+            rules[i].get("rule_type") or "",
+        )
+        wanted += [name for name, matches in _CONSTRUCT_BY_SIGNAL.items()
+                   if matches(*args) and name not in wanted]
+    return " — ".join(wanted) if wanted else "Schema Object Operation Object"
+
+
 def _rag_query_for(target_op: Dict[str, Any], rules: List[Dict[str, Any]]) -> str:
     """Compose a short query for the RAG retriever from the op + first rules."""
     parts: List[str] = []
@@ -237,7 +370,14 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         f"priority={target_op.get('priority', 'medium')}\n"
         f"rationale={target_op.get('rationale', '')!r}"
     )
-    applicable_rules = _build_rules_block(all_rules, source_rule_ids)
+    applicable_rules, rule_buckets = _build_rules_block(all_rules, source_rule_ids)
+    logger.info(
+        f"Patcher → rules for {op_label}: {len(rule_buckets['ok'])} validated, "
+        f"{len(rule_buckets['review'])} disputed (kept for review), "
+        f"{len(rule_buckets['drop'])} dropped"
+    )
+    if rule_buckets["drop"]:
+        logger.info(f"Patcher → dropped rule ids {rule_buckets['drop']}")
     legacy_fragment = _legacy_fragment_for(legacy_openapi, path, method)
     existing_schemas = _existing_schemas_summary(final_openapi)
 
@@ -259,12 +399,18 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         logger.warning(f"Patcher → 3GPP RAG call failed: {e}")
 
     # ── RAG #2 — OpenAPI 3.0 reference (optional, degrades to "") ─
+    # Asked by construct name, not in 3GPP vocabulary — see
+    # _openapi_reference_query.
     openapi_reference = ""
+    reference_query = _openapi_reference_query(all_rules, source_rule_ids)
     try:
         from openapi_generator.tools.rag_tools import search_openapi_reference
-        openapi_reference = search_openapi_reference(rag_query)
+        openapi_reference = search_openapi_reference(reference_query)
         if openapi_reference:
-            logger.info("Patcher → OpenAPI reference RAG returned chunks")
+            logger.info(
+                f"Patcher → OpenAPI reference RAG returned chunks "
+                f"for query={reference_query!r}"
+            )
     except Exception as e:
         logger.warning(f"Patcher → OpenAPI reference RAG call failed: {e}")
 

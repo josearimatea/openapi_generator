@@ -12,7 +12,12 @@ from functools import lru_cache
 from typing import Any
 
 from openapi_generator.config import get_logger
-from openapi_generator.config.settings import MODEL, OPENAI_API_KEY, TEMPERATURE
+from openapi_generator.config.settings import (
+    MODEL,
+    OPENAI_API_KEY,
+    REASONING_EFFORT,
+    TEMPERATURE,
+)
 
 logger = get_logger(__name__)
 
@@ -28,9 +33,14 @@ def get_llm() -> Any:
 
     from langchain_openai import ChatOpenAI
 
-    logger.info(f"Default LLM ready: model={MODEL} temperature={TEMPERATURE}")
+    extra = {"reasoning_effort": REASONING_EFFORT} if REASONING_EFFORT else {}
+    logger.info(
+        f"Default LLM ready: model={MODEL} temperature={TEMPERATURE}"
+        + (f" reasoning_effort={REASONING_EFFORT}" if extra else "")
+    )
     return ChatOpenAI(
         model=MODEL,
         temperature=TEMPERATURE,
         api_key=OPENAI_API_KEY,
+        **extra,
     )

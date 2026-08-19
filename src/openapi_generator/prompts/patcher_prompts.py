@@ -10,7 +10,10 @@ Inputs interpolated into the prompt:
     target_op_summary    — one-line description of the (path, method, action).
     applicable_rules     — full text of every rule grounding this operation,
                            taken from rules_bank["rules"] using the indices
-                           in TargetOperation.source_rule_ids.
+                           in TargetOperation.source_rule_ids. Each rule is
+                           tagged VALIDATED or DISPUTED by the Patcher's gate
+                           (nodes.patcher._rule_verdict); rules the gate
+                           dropped never appear here.
     legacy_fragment      — pretty-printed legacy YAML fragment for this
                            (path, method) when action != 'create'; empty
                            string otherwise.
@@ -46,9 +49,17 @@ OUTPUT FORMAT (returned via structured output as OperationFragment):
     and operationId.
   - components  : a dict shaped as
         {{ "schemas": {{ "<SchemaName>": <JSON-Schema object>, ... }} }}
-    Include ONLY new schemas referenced by this operation. If a schema
-    already exists in the document (see "Existing schemas" below), use
-    $ref instead of redefining it.
+    Define every schema the applicable rules below define — that is, each
+    schema named by a rule whose target is `components/schemas/<Name>` —
+    plus any further schema this operation references. A rule reaching you
+    means the Planner decided this schema belongs here, so define it even
+    when no operation references it: `components.schemas` is a sibling of
+    `paths`, not an appendix to it, and a specification routinely declares a
+    public type (an enumeration, for instance) that no operation happens to
+    use. Omitting such a type loses it from the document entirely.
+    Define nothing beyond that: no schema without a rule, and none that
+    already exists in the document (see "Existing schemas" below) — for
+    those, use $ref instead of redefining.
 
 ACTIONS — interpret the target_op.action:
   - 'create' — build the operation from scratch using ONLY the applicable
@@ -71,6 +82,64 @@ GROUNDING:
     descriptions, NEVER as a source of brand-new constructs not implied by
     a rule.
 
+RULE STATUS — each rule carries a `status` line:
+  - VALIDATED — the rules bank validated it. Treat it as authoritative.
+  - DISPUTED  — the bank's validator objected but the rule was kept for you
+                to arbitrate. It also carries `objection` (why the validator
+                rejected it) and `defence` (why the extractor believed it).
+                Decide using the spec context: apply the rule only if the
+                defence holds up. When you leave a DISPUTED rule out, simply
+                omit it — never emit a placeholder or a commented-out stub.
+
+$ref IS EXCLUSIVE:
+  - An object holding a `$ref` is a Reference Object, and the OpenAPI 3.0
+    specification states it "cannot be extended with additional properties and
+    any properties added SHALL be ignored". A `description`, `type`, `format`
+    or `example` written beside a `$ref` is therefore dead text: no conforming
+    parser reads it.
+  - Wrong:  {{ "$ref": "#/components/schemas/X", "description": "..." }}
+    Right:  {{ "$ref": "#/components/schemas/X" }}
+  - So a property whose type is a named schema is written as the bare `$ref`
+    alone. The wording belongs in the referenced schema, where it is read once
+    and applies to every use.
+  - Wrapping the reference in `allOf` IS the conforming way to attach a
+    sibling keyword, because the outer object is then a Schema Object rather
+    than a Reference Object. Use it only when a rule states something about
+    that specific usage that the referenced schema does not already carry —
+    never merely to repeat a description.
+
+EXTERNAL REFERENCES (other 3GPP spec files):
+  - A rule value like "$ref: 'TS28623_ComDefs.yaml#/components/schemas/Float'"
+    points at a type defined in ANOTHER document. Emit that `$ref` string
+    verbatim, exactly as the rule writes it — same file name, same fragment
+    path. Never rewrite it to a local '#/components/schemas/...' ref, and
+    never invent a local copy of the external schema under `components`.
+    Such a type is external by design: it must NOT appear in your
+    `components.schemas` output.
+  - Only a type this document itself defines belongs in `components.schemas`.
+
+SCHEMA COMPOSITION (allOf / oneOf / anyOf):
+  - A rule whose `openapi_field` is `allOf` means the schema INHERITS from the
+    referenced type. Build it as a two-member composition — the inherited
+    `$ref` first, then a single inline `type: object` member holding the
+    schema's own properties:
+        <SchemaName>:
+          allOf:
+            - $ref: '<ref exactly as the rule gives it>'
+            - type: object
+              properties: {{ ...own properties only... }}
+  - Properties inherited through that `$ref` MUST NOT be repeated as own
+    properties. If a rule tries to redefine an inherited field, drop it.
+  - A rule whose `openapi_field` is `oneOf`/`anyOf` gives the full member
+    list as its value; emit the members in the order given, preserving each
+    member's own form (`type: ...` inline, or `$ref: ...` for a named type).
+  - When several rules target the SAME schema and the SAME composition or
+    `enum` field, MERGE their values into one list in the order the rules
+    appear — do not emit the field more than once and do not let a later
+    rule overwrite an earlier one.
+  - Emit a `required` list only when a rule states it; place it inside the
+    inline `type: object` member that owns those properties.
+
 PATH PARAMETERS:
   - Every path variable enclosed in `{{...}}` in the path MUST appear as
     a parameter with `in: path`, `required: true`, and a schema.
@@ -91,6 +160,9 @@ QUALITY GATES — do not output:
     "Existing schemas".
   - Responses without a schema reference or inline schema.
   - Path parameters absent from the parameters list.
+  - A local schema standing in for a type referenced from another spec file.
+  - Own properties that duplicate what an `allOf` $ref already contributes.
+  - Any key sitting next to a `$ref` in the same object.
 """
 
 _USER = """\
@@ -116,8 +188,9 @@ OPENAPI 3.0 REFERENCE CHUNKS (authoritative spec excerpts via RAG; may be empty)
 
 Produce the OperationFragment now. Remember:
   - `path` and `method` MUST match the target exactly.
-  - Cover every applicable rule in the output.
-  - Define new schemas only when not already in "Existing schemas".
+  - Cover every applicable rule in the output — including a rule that defines
+    a schema no operation references; it still belongs under components.schemas.
+  - Do not redefine anything already in "Existing schemas".
 """
 
 patcher_prompt = ChatPromptTemplate.from_messages([
