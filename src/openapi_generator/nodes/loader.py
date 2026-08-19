@@ -27,6 +27,7 @@ Outputs (state):
 """
 
 import copy
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -46,19 +47,35 @@ def _empty_skeleton() -> Dict[str, Any]:
 
 
 def _info_from_rules_bank(rules_bank: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Build a minimal info block from rules_bank metadata. Empty dict if none."""
+    """Build a minimal info block from rules_bank metadata. Empty dict if none.
+
+    Provenance covers two distinct stages, so each extension names the stage it
+    belongs to: `x-rules-bank-*` describes the bank that fed this run (produced
+    by openapi_rulesbank, possibly by a different model on a different day), and
+    `x-generator-*` describes this generation. Without the split, a lone `model`
+    field reads as though one model did both.
+    """
     if not rules_bank:
         return {}
+    from openapi_generator.config.settings import MODEL
+
     meta = rules_bank.get("metadata") or {}
     info: Dict[str, Any] = {}
     source = meta.get("source_document")
     if source:
         # Use the spec file stem as a placeholder title — Patcher can refine.
         info["title"] = f"OpenAPI generated from {Path(source).stem}"
+    if source:
+        info["x-rules-bank-source-document"] = Path(source).name
     if meta.get("generated_at"):
         info["x-rules-bank-generated-at"] = meta["generated_at"]
     if meta.get("model"):
         info["x-rules-bank-model"] = meta["model"]
+    if meta.get("total_rules") is not None:
+        info["x-rules-bank-total-rules"] = meta["total_rules"]
+
+    info["x-generator-model"] = MODEL
+    info["x-generator-generated-at"] = datetime.now().astimezone().isoformat()
     return info
 
 
@@ -73,7 +90,17 @@ def _seed_final_openapi(
             f"({len(legacy_openapi.get('paths') or {})} path(s), "
             f"{len(((legacy_openapi.get('components') or {}).get('schemas') or {}))} schema(s))"
         )
-        return copy.deepcopy(legacy_openapi)
+        seeded = copy.deepcopy(legacy_openapi)
+        # Keep the legacy's own info (title, version, description) and add only
+        # the provenance extensions, so the document still records what produced
+        # this run.
+        provenance = {
+            k: v for k, v in _info_from_rules_bank(rules_bank).items()
+            if k.startswith("x-")
+        }
+        if provenance:
+            seeded.setdefault("info", {}).update(provenance)
+        return seeded
 
     skeleton = _empty_skeleton()
     skeleton["info"] = _info_from_rules_bank(rules_bank)

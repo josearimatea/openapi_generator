@@ -179,10 +179,19 @@ schema (typically referenced via $ref under requestBody, responses, or
 parameters). The Planner will append the rule indices to every operation
 you pick.
 
+A schema counts as used by an operation BOTH when the operation references it
+directly and when it is reached through another schema the operation already
+carries. Each plan entry lists, under "schemas carried", the schemas its rules
+already define — follow that chain: if an operation carries schema A, and A has
+a property typed by this schema, then this schema is used by that operation.
+Reachability at any depth counts: a type used by a type used by an operation is
+still used by that operation.
+
 Rules:
   - Use ONLY indices that appear in the CURRENT PLAN list.
-  - Return an empty list if no operation plausibly uses the schema; the
-    Planner records the rules as gaps.
+  - Return an empty list ONLY when no operation reaches the schema directly or
+    through the chain above. The Planner records such rules as gaps, so an empty
+    list discards them — prefer attaching when the chain is plausible.
   - Do NOT invent indices.
 """
 

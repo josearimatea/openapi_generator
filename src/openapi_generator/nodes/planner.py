@@ -242,15 +242,49 @@ def _openapi_rag(query: str) -> str:
         return ""
 
 
-def _format_existing_plan(ops: List[TargetOperation]) -> str:
+def _schemas_attached_to(op: TargetOperation, rules: List[Dict[str, Any]]) -> List[str]:
+    """Schema names the rules already attached to this operation define.
+
+    Reuses _rule_group_key, so the names come from whatever the rules bank
+    happens to contain — nothing here knows any particular schema or service.
+    """
+    names: List[str] = []
+    for rid in op.source_rule_ids:
+        if not 0 <= rid < len(rules):
+            continue
+        key = _rule_group_key(rules[rid]) or ""
+        if key.startswith("schema:"):
+            name = key.split(":", 1)[1]
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _format_existing_plan(
+    ops: List[TargetOperation],
+    rules: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Render the plan. With `rules`, each entry also lists the schemas it carries.
+
+    Phase C is asked whether an operation uses a given schema, and a type is
+    usually reached indirectly — through another schema the operation carries.
+    Without those names the question cannot be answered honestly, so the caller
+    passes `rules` when the answer depends on that chain.
+    """
     if not ops:
         return "(plan is empty so far)"
     lines = []
     for i, op in enumerate(ops):
-        lines.append(
+        line = (
             f"- [{i}] {op.action:>7} {op.method.upper():>6} {op.path}  "
             f"(rules so far: {len(op.source_rule_ids)})"
         )
+        if rules is not None:
+            attached = _schemas_attached_to(op, rules)
+            line += "\n        schemas carried: " + (
+                ", ".join(attached) if attached else "(none yet)"
+            )
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -472,7 +506,7 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
             attach: PlannerSchemaAttachment = schema_chain.invoke({
                 "schema_name": schema_name,
                 "schema_rules": _format_candidates(rules, idx_list),
-                "existing_plan": _format_existing_plan(operations),
+                "existing_plan": _format_existing_plan(operations, rules),
                 "openapi_reference": oa_ref,
             })
         except Exception as e:
