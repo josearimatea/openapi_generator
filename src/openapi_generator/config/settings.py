@@ -46,6 +46,12 @@ OPENAPI_REFERENCE_RETRIEVE_CHUNKS = int(
 )
 QDRANT_TIMEOUT = 30  # seconds — kept short so a down Qdrant fails fast
 
+# ── Generated document ────────────────────────────────────────────
+# OpenAPI version stamped on a document built from scratch. The 3GPP TS 28.532
+# specs all declare 3.0.1, so a generated document matches its reference by
+# default; override when targeting a different release.
+OPENAPI_VERSION = os.getenv("OPENAPI_GEN_OPENAPI_VERSION", "3.0.1")
+
 # ── Rule gating (nodes.patcher) ───────────────────────────────────
 # A rules_bank rule the bank's Validator rejected is still force-included by its
 # Builder at MAX_ITERATIONS, so the Patcher decides what to do with it from the

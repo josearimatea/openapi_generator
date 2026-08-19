@@ -6,8 +6,9 @@ Responsibilities:
 2. Seed final_openapi:
      - if legacy_openapi was provided in the state → start from a deep copy
        of it (preserves info / servers / paths / components).
-     - otherwise → start from an empty OpenAPI 3.0.3 skeleton, populating
-       info from rules_bank.metadata when available.
+     - otherwise → start from an empty skeleton stamped with
+       settings.OPENAPI_VERSION, populating info from rules_bank.metadata
+       when available.
 3. Initialize loop counters and the empty accumulators consumed by the
    per-operation loop.
 
@@ -38,8 +39,10 @@ logger = get_logger(__name__)
 
 
 def _empty_skeleton() -> Dict[str, Any]:
+    from openapi_generator.config.settings import OPENAPI_VERSION
+
     return {
-        "openapi": "3.0.3",
+        "openapi": OPENAPI_VERSION,
         "info": {},
         "paths": {},
         "components": {"schemas": {}},
