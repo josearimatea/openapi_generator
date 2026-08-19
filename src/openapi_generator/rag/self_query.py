@@ -3,7 +3,7 @@ Metadata schema for SelfQueryRetriever — matches the 3GPP Qdrant collection
 populated by openapi_chatbotUI / openapi_rulesbank.
 """
 
-from langchain.chains.query_constructor.base import AttributeInfo
+from langchain_classic.chains.query_constructor.base import AttributeInfo
 
 metadata_field_info = [
     AttributeInfo(
