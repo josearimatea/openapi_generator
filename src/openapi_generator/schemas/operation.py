@@ -220,6 +220,95 @@ class PlannerSchemaAttachment(BaseModel):
     rationale: str = Field(default="")
 
 
+class DocumentMetadata(BaseModel):
+    """What a specification's cover page says about the document itself.
+
+    Read by an LLM rather than parsed: the cover survives conversion from PDF
+    or DOCX in whatever shape the converter produces — a Markdown table, a run
+    of loose lines — so the values are stated plainly but never in a
+    predictable position. Every field is optional; report only what the page
+    actually says, and leave the rest empty rather than inventing it.
+    """
+
+    number: str = Field(
+        default="",
+        description="Specification number as printed, e.g. '28.532'. Digits and dot only.",
+    )
+    version: str = Field(
+        default="",
+        description="Document version as printed, e.g. '18.0.0'. No leading 'V'.",
+    )
+    release: str = Field(
+        default="", description="Release number alone, e.g. '18'."
+    )
+    subject: str = Field(
+        default="",
+        description=(
+            "What this document is about, in its own words — the title line "
+            "naming the subject, not the organisation or the working group."
+        ),
+    )
+    copyright: str = Field(
+        default="",
+        description=(
+            "The copyright notice as one line, from the © through the rights "
+            "reservation, exactly as worded."
+        ),
+    )
+
+
+class ServerVariable(BaseModel):
+    """One variable of a Server Object's URL template."""
+
+    name: str = Field(description="Variable name, matching a {placeholder} in the url.")
+    default: str = Field(
+        default="",
+        description=(
+            "Value the specification states for this variable. Empty when the "
+            "normative text names the variable without giving a value — do not "
+            "invent one."
+        ),
+    )
+    description: str = Field(
+        default="",
+        description="How the specification defines the variable, in its own words.",
+    )
+
+
+class ServerDecision(BaseModel):
+    """Where the service described by this document is hosted.
+
+    Produced by the servers pass, which reads the specification's URI clauses
+    and RAG context — the generator owns this block rather than taking it from
+    the rules bank. `url` empty means the specification declares no server for
+    this service — a notification sink addressed through a subscription, say —
+    and the caller falls back to a marked placeholder rather than a plausible
+    guess.
+    """
+
+    url: str = Field(
+        default="",
+        description=(
+            "Server URL template, e.g. '{Root}/SomeService/{Version}'. Include "
+            "only the part that locates the service; anything identifying a "
+            "resource belongs to paths, not here. Empty when the specification "
+            "states no server for this document."
+        ),
+    )
+    variables: List[ServerVariable] = Field(
+        default_factory=list,
+        description="One entry per {placeholder} appearing in url.",
+    )
+    description: str = Field(
+        default="",
+        description="Short note on where the service is hosted, when the spec says.",
+    )
+    rationale: str = Field(
+        default="",
+        description="Which passage settled it, or why the spec states no server.",
+    )
+
+
 class PlannerUngroupedMapping(BaseModel):
     """
     Pass 2 epilogue: bulk-mapping for rules whose openapi_object did not
