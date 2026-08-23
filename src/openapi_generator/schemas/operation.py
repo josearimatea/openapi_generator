@@ -122,6 +122,146 @@ class ValidationVerdict(BaseModel):
     new_missing_rules: List[str] = Field(default_factory=list)
 
 
+class PatcherCorrectedDocument(BaseModel):
+    """The document after the Patcher applied the Validator's fixes.
+
+    The whole document comes back, not a fragment: the fixes touch places
+    spread across it, and some depend on each other — a schema added and the
+    $ref pointing at it — so they are applied together and returned together.
+    """
+
+    paths: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The complete `paths` block, corrected.",
+    )
+    components: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The complete `components` block, corrected.",
+    )
+    applied: List[str] = Field(
+        default_factory=list,
+        description="Dotted path of each fix applied.",
+    )
+    skipped: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Fixes left unapplied, each with its reason — the place was not "
+            "where the fix said, or the instruction contradicted the document."
+        ),
+    )
+
+
+class ValidatorFix(BaseModel):
+    """One change the Patcher must make to the document.
+
+    The Reflector says what is wrong; this says what to do about it. Each fix
+    names one place and one action, so the Patcher edits the document it
+    already produced instead of generating it again — regenerating risks losing
+    what was already right.
+    """
+
+    action: Literal["change", "add", "remove"] = Field(
+        description=(
+            "'change' to correct something present, 'add' to supply something "
+            "missing, 'remove' to take out what does not belong."
+        )
+    )
+    where: str = Field(
+        description=(
+            "Dotted path to the place to edit, e.g. "
+            "'paths./x.post.responses.204'. For 'add', the path the new item "
+            "will occupy once it exists."
+        )
+    )
+    instruction: str = Field(
+        description=(
+            "What to do, precisely enough to act on without re-reading the "
+            "analysis: the value to write, the field to drop, the shape to "
+            "give what is added."
+        )
+    )
+    rule_ids: List[int] = Field(
+        default_factory=list,
+        description="Rules this fix answers to, when any do.",
+    )
+
+
+class ValidatorVerdict(BaseModel):
+    """The Validator's decision about the document, and the fixes it calls for."""
+
+    fixes: List[ValidatorFix] = Field(
+        default_factory=list,
+        description="Every change to make, most important first.",
+    )
+    summary: str = Field(
+        default="",
+        description="One or two sentences on the state of the document.",
+    )
+
+
+class ReflectorIssue(BaseModel):
+    """One thing the Reflector found wrong with, or missing from, a fragment.
+
+    It states the problem, not the fix: turning this into an instruction the
+    Patcher can act on is the Validator's job.
+    """
+
+    where: str = Field(
+        description=(
+            "Dotted path to the offending place, e.g. "
+            "'paths./x.post.responses.204' or "
+            "'components.schemas.Foo.properties.bar'. Name the fragment as a "
+            "whole only for a problem belonging to no single part."
+        )
+    )
+    problem: str = Field(description="What is wrong or missing, in one sentence.")
+    severity: Literal["error", "warning"] = Field(
+        default="error",
+        description=(
+            "'error' when the document is wrong — invalid OpenAPI, or "
+            "contradicting a rule. 'warning' when it is valid but weaker than "
+            "it should be, such as a response carrying no description."
+        ),
+    )
+    rule_ids: List[int] = Field(
+        default_factory=list,
+        description="Indices of the rules bearing on this issue, when any do.",
+    )
+
+
+class ReflectorReview(BaseModel):
+    """The Reflector's reading of one generated fragment.
+
+    Two passes over the same fragment: each part on its own — does this
+    parameter, this response, this schema hold up against the rule behind it —
+    and then the fragment as a whole, where the questions are about coherence
+    and completeness rather than about any single part.
+    """
+
+    issues: List[ReflectorIssue] = Field(
+        default_factory=list,
+        description="Everything wrong or missing, most serious first.",
+    )
+    unapplied_rule_ids: List[int] = Field(
+        default_factory=list,
+        description=(
+            "Rules given to this operation that the fragment does not reflect "
+            "anywhere. Empty when every rule was applied."
+        ),
+    )
+    ungrounded: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Dotted paths to parts of the fragment that no rule and no legacy "
+            "fragment accounts for — invented rather than derived."
+        ),
+    )
+    summary: str = Field(
+        default="",
+        description="One or two sentences on the state of this fragment.",
+    )
+
+
 class PlannerPass1Verdict(BaseModel):
     """
     Verdict returned by the Planner Pass 1 (per legacy operation).
@@ -220,7 +360,7 @@ class PlannerSchemaAttachment(BaseModel):
     rationale: str = Field(default="")
 
 
-class DocumentMetadata(BaseModel):
+class LoaderDocumentMetadata(BaseModel):
     """What a specification's cover page says about the document itself.
 
     Read by an LLM rather than parsed: the cover survives conversion from PDF
@@ -257,7 +397,7 @@ class DocumentMetadata(BaseModel):
     )
 
 
-class ServerVariable(BaseModel):
+class PatcherServerVariable(BaseModel):
     """One variable of a Server Object's URL template."""
 
     name: str = Field(description="Variable name, matching a {placeholder} in the url.")
@@ -275,7 +415,7 @@ class ServerVariable(BaseModel):
     )
 
 
-class ServerDecision(BaseModel):
+class PatcherServerDecision(BaseModel):
     """Where the service described by this document is hosted.
 
     Produced by the servers pass, which reads the specification's URI clauses
@@ -295,7 +435,7 @@ class ServerDecision(BaseModel):
             "states no server for this document."
         ),
     )
-    variables: List[ServerVariable] = Field(
+    variables: List[PatcherServerVariable] = Field(
         default_factory=list,
         description="One entry per {placeholder} appearing in url.",
     )
