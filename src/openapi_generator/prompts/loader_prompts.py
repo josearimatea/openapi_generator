@@ -50,7 +50,7 @@ _USER = """\
 COVER PAGE:
 {cover_page}
 
-Report the DocumentMetadata now.
+Report the LoaderDocumentMetadata now.
 """
 
 loader_metadata_prompt = ChatPromptTemplate.from_messages([

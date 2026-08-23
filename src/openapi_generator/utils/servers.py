@@ -159,13 +159,13 @@ def document_metadata(spec_text: str, llm=None) -> Dict[str, Any]:
         llm = get_llm()
 
     from openapi_generator.prompts.loader_prompts import loader_metadata_prompt
-    from openapi_generator.schemas.operation import DocumentMetadata
+    from openapi_generator.schemas.operation import LoaderDocumentMetadata
 
     try:
         chain = loader_metadata_prompt | llm.with_structured_output(
-            DocumentMetadata, method="function_calling"
+            LoaderDocumentMetadata, method="function_calling"
         )
-        read: DocumentMetadata = chain.invoke({"cover_page": cover})
+        read: LoaderDocumentMetadata = chain.invoke({"cover_page": cover})
     except Exception as e:
         logger.warning(f"cover-page pass failed ({type(e).__name__}: {e})")
         return {}

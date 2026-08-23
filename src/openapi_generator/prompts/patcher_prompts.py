@@ -140,6 +140,23 @@ SCHEMA COMPOSITION (allOf / oneOf / anyOf):
   - Emit a `required` list only when a rule states it; place it inside the
     inline `type: object` member that owns those properties.
 
+DESCRIPTIONS. Write one on each response, and on the operation's summary and
+description. Write one nowhere else — a schema property carries no description,
+whatever its rule says about it: the property name and its type already state
+what the rule states, and a $ref ignores anything beside it. These rules govern
+the wording of the ones you do write:
+  - Write from the rule's `text`, never from its `value`. The value is the
+    construct to emit; the text is what to say about it.
+  - Say everything that sentence says, and say it as the outcome rather than as
+    a report on the operation: "Success case. The notification was delivered;
+    no message body is returned" — not "The POST operation returns 204".
+  - Say what happened, not what the field is called. `4XX` already says 4XX.
+  - Every response description must differ from every other in the operation.
+    Each status code is a distinct outcome, so each says what distinguishes it
+    from all the rest — drawing on what the code itself means under RFC 7231,
+    which the OpenAPI reference names as the authority on status codes.
+  - Add nothing the rule does not state.
+
 RULE TYPES:
 Each rule in APPLICABLE RULES has a `type`. The type tells you what that one
 rule defines, where it goes in the output, and how to write it. Apply each
@@ -189,6 +206,63 @@ Produce the OperationFragment now. Remember:
 patcher_prompt = ChatPromptTemplate.from_messages([
     ("system", _SYSTEM),
     ("human", _USER),
+])
+
+
+# ── correction pass ───────────────────────────────────────────────────────
+# After every operation is assembled, the Reflector reviews the document and
+# the Validator turns what it confirmed into fixes. They all arrive together,
+# and one call applies them all: the document is edited, not generated again,
+# so what was already right survives untouched.
+
+_CORRECTION_SYSTEM = """\
+You are an expert in 3GPP technical specifications and OpenAPI 3.0 design.
+
+You are given a generated OpenAPI document and a list of fixes to apply to it.
+Return the corrected document.
+
+EDIT, DO NOT REWRITE. Everything not named by a fix must come back exactly as
+it was — same paths, same schemas, same wording, same order. You are not
+reviewing the document and not improving it: the review is finished, and
+anything the fixes do not mention has been accepted as it stands. Changing it
+would discard work already judged correct.
+
+Each fix names an action and a place:
+  change — the place exists and is wrong. Make it what the instruction says.
+  add    — the place is missing. Insert it, in the shape the instruction gives.
+  remove — the place exists and does not belong. Take it out, and nothing else.
+
+Apply every fix. When one cannot be applied — the place is not where the fix
+says, or the instruction contradicts the document — leave that part untouched
+rather than guessing; a later round can revisit it.
+
+The rules and reference material below are the same ones the document was built
+from. Use them to write what a fix asks for, and follow the same conventions
+that govern the rest of the document: a $ref stands alone, an external $ref is
+copied verbatim, a composition keeps its two-member shape.
+
+Return the whole document, not a fragment and not a diff.
+"""
+
+_CORRECTION_USER = """\
+DOCUMENT TO CORRECT:
+{document_yaml}
+
+FIXES TO APPLY:
+{fixes}
+
+RULES BEHIND THE DOCUMENT:
+{applicable_rules}
+
+OPENAPI 3.0 REFERENCE (may be empty):
+{openapi_reference}
+
+Return the corrected document now.
+"""
+
+patcher_correction_prompt = ChatPromptTemplate.from_messages([
+    ("system", _CORRECTION_SYSTEM),
+    ("human", _CORRECTION_USER),
 ])
 
 
@@ -246,7 +320,7 @@ RESOURCE URI CLAUSES FOUND IN THE SPECIFICATION:
 3GPP CONTEXT (retrieved passages; may be empty):
 {rag_context}
 
-Produce the ServerDecision now.
+Produce the PatcherServerDecision now.
 """
 
 patcher_servers_prompt = ChatPromptTemplate.from_messages([
