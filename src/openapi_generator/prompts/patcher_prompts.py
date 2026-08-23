@@ -140,19 +140,12 @@ SCHEMA COMPOSITION (allOf / oneOf / anyOf):
   - Emit a `required` list only when a rule states it; place it inside the
     inline `type: object` member that owns those properties.
 
-PATH PARAMETERS:
-  - Every path variable enclosed in `{{...}}` in the path MUST appear as
-    a parameter with `in: path`, `required: true`, and a schema.
-  - The variable name in the parameter must match the variable in the path.
+RULE TYPES:
+Each rule in APPLICABLE RULES has a `type`. The type tells you what that one
+rule defines, where it goes in the output, and how to write it. Apply each
+rule according to its own type:
 
-RESPONSES:
-  - Always include at least one success response (2XX) and at least one
-    error response (4XX or 5XX, or "default") if rules suggest it.
-  - Use `$ref` for response bodies whose schemas already exist.
-
-OPERATION ID:
-  - Provide a stable, lowerCamelCase `operationId` derived from the
-    operation's primary IS source_name (visible in the applicable rules).
+{rule_type_guide}
 
 QUALITY GATES — do not output:
   - Operations whose path or method disagrees with the target_op.

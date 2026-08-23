@@ -54,8 +54,14 @@ from openapi_generator.config import get_logger
 from openapi_generator.config.settings import RULE_RESCUE_CONFIDENCE
 from openapi_generator.prompts.patcher_prompts import patcher_prompt
 from openapi_generator.schemas.operation import OperationFragment
+from openapi_generator.schemas.rule_types import format_for_prompt
 
 logger = get_logger(__name__)
+
+# The full taxonomy, not just the types this operation happens to carry: the
+# guidance has to hold for any MnS, and a bank that starts emitting a type the
+# prompt never described would otherwise be handled blind.
+RULE_TYPE_GUIDE = format_for_prompt()
 
 
 def _empty_fragment(target_op: Dict[str, Any]) -> Dict[str, Any]:
@@ -436,6 +442,7 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
             "applicable_rules": applicable_rules,
             "legacy_fragment": legacy_fragment or "(no legacy fragment — building from scratch)",
             "existing_schemas": existing_schemas,
+            "rule_type_guide": RULE_TYPE_GUIDE,
             "rag_context": rag_context or "(3GPP RAG unavailable for this run)",
             "openapi_reference": openapi_reference or "(OpenAPI reference RAG unavailable for this run)",
             "correction_task": correction_task,

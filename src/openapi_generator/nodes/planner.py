@@ -1,11 +1,15 @@
 """
 Planner — two passes built around three OpenAPI destinations.
 
-Every rule in rules_bank is classified by rule_type into one of three
-group keys (see _rule_group_key):
-    op:<path>:<method>      — path_operation / request_body / response
+Every rule in rules_bank is classified by rule_type into one of four
+group keys (see _rule_group_key; the taxonomy lives in
+schemas.rule_types.RULE_TYPES):
+    op:<path>:<method>      — path_operation / request_body / response /
+                              callback (anchored on the operation that
+                              registers it)
     path:<path>             — path_parameter / query_parameter
     schema:<SchemaName>     — schema_property
+    security:<SchemeName>   — security_scheme
 
 Pass 1 — Polish the legacy
   For every (path, method) already present in legacy_openapi:
@@ -97,14 +101,38 @@ def _legacy_fragment_yaml(legacy: Dict[str, Any], path: str, method: str) -> str
 
 def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
     """
-    Classify the rule into one of three destination buckets in the final
-    OpenAPI document. Returns a discriminated string key, or None when the
-    rule cannot be placed (unknown rule_type / malformed openapi_object).
+    Route one rule to its destination in the final OpenAPI document.
 
-    Key shapes:
-      - 'op:<path>:<method>'     → goes to paths.<path>.<method>
-      - 'path:<path>'            → goes to every method under that path
-      - 'schema:<SchemaName>'    → goes to components.schemas.<Name>
+    This is addressing, not planning: `rule_type` says which OpenAPI construct
+    the rule describes, and `openapi_mapping` says where it lands. Both were
+    decided by the rules bank, which did the semantic work of reading the spec;
+    here they are only read back. The judgement calls belong to the LLM passes
+    that follow (Pass 1 keep/update/discard, Phase A new-or-attach, Phase C
+    schema attachment), and those operate on the groups this function forms.
+
+    The eight rule types the rules bank emits (openapi_rulesbank RawRule), and
+    where each belongs:
+
+      path_operation   IS operation name → paths.<path>, method in openapi_field
+      request_body     IS operation name → paths.<path>.<method>.requestBody
+      response         IS operation name → paths.<path>.<method>.responses
+      path_parameter   param name        → paths.<path>, applies to every method
+      query_parameter  param name        → paths.<path>, applies to every method
+      schema_property  NRM attribute     → components.schemas.<Name>
+      callback         notification name → callbacks of the operation that
+                                           registers it
+      security_scheme  scheme name       → components.securitySchemes.<Name>
+
+    Key shapes returned:
+      - 'op:<path>:<method>'     → paths.<path>.<method>
+      - 'path:<path>'            → every method under that path
+      - 'schema:<SchemaName>'    → components.schemas.<Name>
+      - 'security:<SchemeName>'  → components.securitySchemes.<Name>
+
+    Returns None when the rule cannot be placed, which drops it from the plan
+    entirely — it never reaches the Patcher, so it is never weighed by any LLM.
+    A rule type missing from this function is therefore silently lost, not
+    judged badly; keep it in step with the rules bank taxonomy above.
     """
     rule_type = rule.get("rule_type")
     mapping = rule.get("openapi_mapping") or {}
@@ -119,10 +147,45 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
             return f"schema:{m.group(1)}"
         return None
 
+    # ── security schemes ─────────────────────────────────────────────────────
+    if rule_type == "security_scheme":
+        m = re.match(r"^components[/.]securitySchemes[/.]([A-Za-z0-9_]+)$", obj)
+        return f"security:{m.group(1)}" if m else None
+
     # ── path-anchored rules ──────────────────────────────────────────────────
     if not obj.startswith("paths."):
         return None
     rest = obj[len("paths."):]
+
+    # ── callbacks ────────────────────────────────────────────────────────────
+    # A Callback Object lives inside the operation that registers it, so a rule
+    # about one belongs to that operation — not to a path of its own. Cut
+    # everything from '.callbacks.' onwards and anchor on what precedes it.
+    #
+    # Two shapes occur. Some rules carry rule_type 'callback'; others describe
+    # the callback's own operation with the ordinary types (path_operation,
+    # request_body, response) and put the whole callback chain in
+    # openapi_object. Both are handled here, before the per-type branches
+    # below, because otherwise the dotted chain reads as a URL and yields paths
+    # such as '/{className}={id}.callbacks.notifyMOICreation.{request.body#/…}'.
+    if ".callbacks." in rest or "/callbacks/" in rest:
+        owner = re.split(r"[./]callbacks[./]", rest, maxsplit=1)[0]
+        # The registering method may close the owner chain
+        # ('/x.post.callbacks.…'); when it does, it is the method we want. The
+        # method sitting AFTER '.callbacks.' belongs to the callback itself and
+        # must not be mistaken for it.
+        tail = re.search(
+            r"^(.+)[./](get|put|post|delete|patch|head|options)$",
+            owner,
+            flags=re.IGNORECASE,
+        )
+        if tail:
+            return f"op:{tail.group(1)}:{tail.group(2).lower()}"
+        # Otherwise the owner is a bare path: take the method from
+        # openapi_field when it names one, else group by path so Phase B
+        # spreads the rule over every method of that path.
+        method = field.lower()
+        return f"op:{owner}:{method}" if method in _HTTP_METHODS else f"path:{owner}"
 
     # path_operation: openapi_object is paths.<path>; method is in openapi_field.
     if rule_type == "path_operation":
@@ -381,6 +444,7 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
     op_groups: Dict[Tuple[str, str], List[int]] = {}
     path_groups: Dict[str, List[int]] = {}
     schema_groups: Dict[str, List[int]] = {}
+    security_groups: Dict[str, List[int]] = {}
     unknown: List[int] = []
 
     for i in residual_indices:
@@ -397,6 +461,13 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         elif key.startswith("schema:"):
             _, name = key.split(":", 1)
             schema_groups.setdefault(name, []).append(i)
+        elif key.startswith("security:"):
+            # A security scheme belongs to the document, not to one operation.
+            # Attach it to every operation so whichever Patcher call runs first
+            # defines it under components; the Assembler keeps the first
+            # definition on a name collision.
+            _, name = key.split(":", 1)
+            security_groups.setdefault(name, []).append(i)
         else:
             unknown.append(i)
 
@@ -494,6 +565,32 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         logger.info(
             f"  Phase B path={raw_path!r} → attached {len(idx_list)} rule(s) "
             f"to {len(targets)} op(s)"
+        )
+
+    # ── PHASE B2 — security schemes: document-wide, no LLM call ─────────────
+    # Unlike a schema, which an operation may or may not use, a securityScheme
+    # is a document-level component: there is nothing to decide about which
+    # operation owns it. Attach it to every operation so the first Patcher call
+    # defines it under components — the Assembler keeps the first definition
+    # when a component name collides.
+    for scheme_name, idx_list in security_groups.items():
+        if not operations:
+            logger.warning(
+                f"  Phase B2 security={scheme_name!r} → plan has no operation; "
+                f"{len(idx_list)} rule(s) left as gaps"
+            )
+            unknown.extend(idx_list)
+            continue
+        for op in operations:
+            existing = set(op.source_rule_ids)
+            for rid in idx_list:
+                if rid not in existing:
+                    op.source_rule_ids.append(rid)
+                    existing.add(rid)
+        consumed_rule_ids.update(idx_list)
+        logger.info(
+            f"  Phase B2 security={scheme_name!r} → attached {len(idx_list)} "
+            f"rule(s) to all {len(operations)} op(s)"
         )
 
     # ── PHASE C — schema groups: LLM picks which ops use the schema ─────────

@@ -49,9 +49,9 @@ class TargetOperation(BaseModel):
         default_factory=list,
         description=(
             "Zero-based indices into rules_bank['rules'] for every rule "
-            "that grounds this operation (path_operation, path_parameter, "
-            "query_parameter, request_body, response, schema_property, "
-            "security_scheme). Empty list is only acceptable for 'keep'."
+            "that grounds this operation, of any type in "
+            "schemas.rule_types.RULE_TYPES. Empty list is only acceptable "
+            "for 'keep'."
         ),
     )
     priority: Priority = Field(
