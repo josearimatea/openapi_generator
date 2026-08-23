@@ -110,12 +110,72 @@ def _force_include_annotation(
     return annotated
 
 
+_GENERATOR_KEY = "  x-openapi-generator:"
+_SEPARATOR = "  # " + "-" * 68
+
+
+class _IndentedDumper(yaml.SafeDumper):
+    """Indent list items under the key that owns them.
+
+    PyYAML writes a sequence flush with its parent key, which reads as though
+    the item sat at the parent's level. Published OpenAPI documents indent it,
+    so generated files match what a reader is used to.
+    """
+
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow, False)
+
+
+def _rule_after_generator_block(text: str) -> str:
+    """Draw a comment rule where the generator's own block ends.
+
+    `info` opens with how the document was produced and continues with what the
+    specification says it is. The two read as one list otherwise, so a rule is
+    inserted at the boundary: the first line after the x-openapi-generator
+    block that is indented as a sibling key.
+    """
+    lines = text.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith(_GENERATOR_KEY))
+    except StopIteration:
+        return text
+
+    for i in range(start + 1, len(lines)):
+        line = lines[i]
+        if line.strip() and not line.startswith("    "):
+            if not line.startswith("  "):
+                break  # info ended without any spec field following
+            lines.insert(i, _SEPARATOR)
+            return "\n".join(lines) + "\n"
+    return text
+
+
 def _write_final_yaml(final_openapi: Dict[str, Any], target_path: str) -> str:
     """Write the final OpenAPI document to disk. Returns the absolute path."""
     p = Path(target_path).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
+    # The Loader reserves the optional top-level blocks so the document comes
+    # out in canonical order; the ones nothing filled are dropped here rather
+    # than published empty.
+    document = {
+        key: value
+        for key, value in final_openapi.items()
+        if value or key in ("openapi", "info", "paths")
+    }
+    text = yaml.dump(
+        document,
+        Dumper=_IndentedDumper,
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    )
+    # safe_dump writes no comments, so the rule separating how the document was
+    # produced from what it describes is drawn afterwards. It sits between the
+    # x-openapi-generator block and the specification's own info fields, which
+    # the Loader ordered that way.
+    text = _rule_after_generator_block(text)
     with p.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(final_openapi, f, sort_keys=False, allow_unicode=True)
+        f.write(text)
     logger.info(f"Assembler → wrote final OpenAPI to {p}")
     return str(p)
 
