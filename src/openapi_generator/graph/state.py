@@ -59,6 +59,12 @@ class OpenAPIGenState(TypedDict, total=False):
     #   }
     current_fragment: Dict[str, Any]
 
+    # What the Patcher retrieved to write each operation, kept for the
+    # Reflector: reviewing a fragment against a different context than the one
+    # it was written from is how a sound fragment comes to look wrong.
+    #   {"<method> <path>": {"rag_context": str, "openapi_reference": str}}
+    op_context: Dict[str, Any]
+
     # ── Reflector output ──────────────────────────────────────
     reflected_fragment: Dict[str, Any]
     fragment_reflection: Dict[str, Any]   # Phase-2 completeness analysis (input to Validator stage 3)

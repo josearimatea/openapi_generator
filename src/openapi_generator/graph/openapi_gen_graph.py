@@ -1,14 +1,28 @@
 """
 LangGraph definition for the OpenAPI generation pipeline.
 
-Per-operation loop with two conditional edges (mirrors openapi_rulesbank):
+Two loops: one builds the document an operation at a time, the other reviews
+and corrects the finished whole.
 
-    [loader] → [planner] → [patcher] → [reflector] → [validator] ──→ [assembler] → END
-                              ↑                          │                │
-                              │   error rate > threshold │   next op      │
-                              │   AND retries < max      │                │
-                              └────── retry op ──────────┘                │
-                              └─────────────── next op ──────────────────┘
+    [loader] → [planner] → [patcher] → [assembler] ─── next op ───┐
+                              ↑                │                  │
+                              └────────────────┴──────────────────┘
+                                               │ every operation merged
+                                               ▼
+                              ┌───────── [reflector] → [validator] → END
+                              │              ▲              │
+                              └── corrections┘              │ fixes to apply
+                                  applied in place ─────────┘
+
+The Assembler follows the Patcher directly, merging and writing the document
+after each operation — as openapi_rulesbank's Builder saves its bank after each
+section — so a failure partway costs the operations still to come rather than
+the ones already done.
+
+Review runs on the assembled document rather than on a fragment: the Reflector
+checks it structurally, reads it part by part, then weighs everything against
+the whole; the Validator turns what it confirmed into fixes; and the Patcher
+applies them in place, leaving untouched whatever no fix names.
 
 Dependency injection (all optional):
   - checkpointer: LangGraph saver chosen by the host application (SqliteSaver,
@@ -32,6 +46,7 @@ from langgraph.graph import END, StateGraph
 
 from openapi_generator.config import get_logger
 from openapi_generator.graph.conditions import (
+    should_assemble_or_review,
     should_next_op_or_end,
     should_retry_op_or_assemble,
 )
@@ -74,26 +89,42 @@ def build_openapi_gen_graph(
     # Linear setup phase
     graph.add_edge("loader", "planner")
     graph.add_edge("planner", "patcher")
-    graph.add_edge("patcher", "reflector")
-    graph.add_edge("reflector", "validator")
 
-    # Validator → retry patcher OR proceed to assembler
+    # While operations remain, the Assembler follows the Patcher directly,
+    # merging and saving after each one, so the document grows on disk as it is
+    # built and a failure partway does not cost the work already done. Once the
+    # Patcher is correcting the assembled document instead of adding to it,
+    # there is nothing to merge and it goes straight back for review.
     graph.add_conditional_edges(
-        "validator",
-        should_retry_op_or_assemble,
+        "patcher",
+        should_assemble_or_review,
         {
-            "retry": "patcher",
             "assemble": "assembler",
+            "review": "reflector",
         },
     )
 
-    # Assembler → next operation (back to patcher) OR end
+    # Assembler → next operation, or on to the review once every operation is in
     graph.add_conditional_edges(
         "assembler",
         should_next_op_or_end,
         {
             "next": "patcher",
-            "__end__": END,
+            "__end__": "reflector",
+        },
+    )
+
+    # Review runs on the assembled document, not on a fragment: the Reflector
+    # reports what is wrong, the Validator says what to do about it.
+    graph.add_edge("reflector", "validator")
+
+    # Validator → hand the fixes to the Patcher, or finish
+    graph.add_conditional_edges(
+        "validator",
+        should_retry_op_or_assemble,
+        {
+            "retry": "patcher",
+            "assemble": END,
         },
     )
 
