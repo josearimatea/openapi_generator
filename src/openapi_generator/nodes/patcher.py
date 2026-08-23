@@ -322,7 +322,7 @@ def _decide_servers(
     a sibling service's prefix.
     """
     from openapi_generator.prompts.patcher_prompts import patcher_servers_prompt
-    from openapi_generator.schemas.operation import ServerDecision
+    from openapi_generator.schemas.operation import PatcherServerDecision
     from openapi_generator.utils.servers import placeholder_servers, uri_clauses
 
     rag_context = ""
@@ -337,9 +337,9 @@ def _decide_servers(
 
     try:
         chain = patcher_servers_prompt | llm.with_structured_output(
-            ServerDecision, method="function_calling"
+            PatcherServerDecision, method="function_calling"
         )
-        decision: ServerDecision = chain.invoke({
+        decision: PatcherServerDecision = chain.invoke({
             "document_paths": ", ".join(document_paths) or "(none yet)",
             "uri_clauses": uri_clauses(spec_text, document_paths),
             "rag_context": rag_context or "(no 3GPP RAG context)",
@@ -394,7 +394,131 @@ def _rag_query_for(target_op: Dict[str, Any], rules: List[Dict[str, Any]]) -> st
     return " — ".join(parts) if parts else (target_op.get("path") or "")
 
 
+def _apply_corrections(state: dict, llm, retriever) -> Dict[str, Any]:
+    """Apply the Validator's fixes to the assembled document.
+
+    One call for all of them. The fixes touch places spread across the document
+    and some depend on each other — a schema added and the $ref pointing at it —
+    so applying them one at a time would have each call rewrite what the last
+    one just did.
+
+    The document is edited rather than generated again: everything no fix names
+    comes back untouched, which is the point. Regenerating would put work
+    already judged correct back at risk.
+    """
+    from openapi_generator.nodes.reflector import document_rag_context
+    from openapi_generator.prompts.patcher_prompts import patcher_correction_prompt
+    from openapi_generator.schemas.operation import PatcherCorrectedDocument
+
+    document = state.get("final_openapi") or {}
+    fixes = state.get("validation_errors") or []
+    iteration = state.get("op_iteration_count", 0)
+    rules = (state.get("rules_bank") or {}).get("rules") or []
+    plan = state.get("operations_plan") or []
+
+    logger.info(f"Patcher → applying {len(fixes)} fix(es), round {iteration + 1}")
+
+    rule_ids = sorted({rid for op in plan for rid in (op.get("source_rule_ids") or [])})
+    rules_block, _ = _build_rules_block(rules, rule_ids)
+    _, reference = document_rag_context(document, rules, plan, retriever=None)
+
+    fixes_block = "\n".join(
+        f"  - {f.get('action', 'change').upper()} at {f.get('ref', '?')}\n"
+        f"      {f.get('instruction', '')}"
+        + (f"\n      rules: {f['rule_ids']}" if f.get("rule_ids") else "")
+        for f in fixes
+    )
+
+    try:
+        chain = patcher_correction_prompt | llm.with_structured_output(
+            PatcherCorrectedDocument, method="function_calling"
+        )
+        corrected: PatcherCorrectedDocument = chain.invoke({
+            "document_yaml": yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+            "fixes": fixes_block,
+            "applicable_rules": rules_block,
+            "openapi_reference": reference or "(no OpenAPI reference)",
+        })
+    except Exception as e:
+        logger.error(f"Patcher → correction pass failed: {e}", exc_info=True)
+        # Leave the document as it was; the round is spent either way, and the
+        # budget in graph.conditions stops the loop.
+        return {"op_iteration_count": iteration + 1, "validation_errors": []}
+
+    # Take what came back key by key rather than swapping the blocks whole. The
+    # correction is asked for the entire document, but a model that returns
+    # only the part it touched would otherwise delete everything it left out —
+    # and a schema silently dropped here is far worse than a fix not applied.
+    # A removal therefore has to be asked for: `remove` fixes name what goes.
+    updated = copy.deepcopy(document)
+    removals = {
+        f.get("ref", "") for f in fixes if f.get("action") == "remove"
+    }
+
+    def merge(into: Dict[str, Any], came_back: Dict[str, Any], at: str) -> None:
+        for key, value in came_back.items():
+            here = f"{at}.{key}" if at else key
+            if isinstance(value, dict) and isinstance(into.get(key), dict):
+                merge(into[key], value, here)
+            else:
+                into[key] = value
+        for key in list(into):
+            if key in came_back:
+                continue
+            here = f"{at}.{key}" if at else key
+            if any(r.startswith(here) for r in removals):
+                into.pop(key)
+                logger.info(f"Patcher → removed {here}")
+
+    # `applied` and `skipped` are the model's report on its own work, and the
+    # structured output invites it to nest them inside the blocks it returns
+    # rather than beside them. They are not OpenAPI and must not reach the
+    # document, so they are stripped wherever they turn up.
+    def content_only(block: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: v for k, v in block.items() if k not in ("applied", "skipped")}
+
+    if corrected.paths:
+        merge(updated.setdefault("paths", {}), content_only(corrected.paths), "paths")
+    if corrected.components:
+        merge(
+            updated.setdefault("components", {}),
+            content_only(corrected.components),
+            "components",
+        )
+
+    logger.info(
+        f"Patcher → applied {len(corrected.applied)} fix(es)"
+        + (f", skipped {len(corrected.skipped)}" if corrected.skipped else "")
+    )
+    for skipped in corrected.skipped:
+        logger.warning(f"Patcher → fix not applied: {skipped}")
+
+    target = state.get("openapi_target_path") or ""
+    out: Dict[str, Any] = {
+        "final_openapi": updated,
+        "op_iteration_count": iteration + 1,
+        # Cleared so the next review starts from what the document now says.
+        "validation_errors": [],
+        "fragment_reflection": {},
+    }
+    if target:
+        try:
+            from openapi_generator.nodes.assembler import _write_final_yaml
+            out["final_output_path"] = _write_final_yaml(updated, target)
+        except Exception as e:
+            logger.error(f"Patcher → could not rewrite the YAML: {e}", exc_info=True)
+    return out
+
+
 def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
+    # Two modes. With fixes pending, the document is corrected as a whole;
+    # otherwise the next operation in the plan is generated.
+    if state.get("validation_errors"):
+        if llm is None:
+            from openapi_generator.config.llm_config import get_llm
+            llm = get_llm()
+        return _apply_corrections(state, llm, retriever)
+
     plan = state.get("operations_plan") or []
     idx = state.get("current_op_idx", 0)
     iteration = state.get("op_iteration_count", 0)
@@ -552,6 +676,16 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "current_fragment": fragment_dict,
         "op_iteration_count": iteration + 1,
+        # Keep what was retrieved to write this operation. The Reflector reviews
+        # it later and needs the same grounding: judged against other passages,
+        # a sound operation can be made to look wrong.
+        "op_context": {
+            **(state.get("op_context") or {}),
+            f"{method} {path}": {
+                "rag_context": rag_context,
+                "openapi_reference": openapi_reference,
+            },
+        },
     }
 
     # `servers` belongs to the document, not to any one operation, so it is
