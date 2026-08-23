@@ -46,6 +46,7 @@ LLM/Retriever injection:
 
 import copy
 import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
@@ -303,6 +304,77 @@ def _openapi_reference_query(rules: List[Dict[str, Any]], indices: List[int]) ->
     return " — ".join(wanted) if wanted else "Schema Object Operation Object"
 
 
+def _decide_servers(
+    llm,
+    retriever,
+    spec_text: str,
+    document_paths: List[str],
+) -> List[Dict[str, Any]]:
+    """Work out the document's `servers`, reading the specification.
+
+    The generator owns this block: it says where the service is hosted, which
+    is a property of the document rather than a rule extracted from a clause.
+
+    A specification may legitimately declare no server — a notification sink
+    addressed through a subscription has none the producer could name — and in
+    that case a marked placeholder goes in, so the document still tells a
+    client what to call and the gap stays visible instead of being filled with
+    a sibling service's prefix.
+    """
+    from openapi_generator.prompts.patcher_prompts import patcher_servers_prompt
+    from openapi_generator.schemas.operation import ServerDecision
+    from openapi_generator.utils.servers import placeholder_servers, uri_clauses
+
+    rag_context = ""
+    if retriever is not None and document_paths:
+        try:
+            chunks = retriever(
+                f"resource URI structure server root {document_paths[0]}", k=3
+            )
+            rag_context = "\n\n---\n\n".join(chunks or [])
+        except Exception as e:
+            logger.warning(f"Patcher → servers RAG failed: {e}")
+
+    try:
+        chain = patcher_servers_prompt | llm.with_structured_output(
+            ServerDecision, method="function_calling"
+        )
+        decision: ServerDecision = chain.invoke({
+            "document_paths": ", ".join(document_paths) or "(none yet)",
+            "uri_clauses": uri_clauses(spec_text, document_paths),
+            "rag_context": rag_context or "(no 3GPP RAG context)",
+        })
+    except Exception as e:
+        logger.error(f"Patcher → servers pass failed: {e}", exc_info=True)
+        return [placeholder_servers(
+            f"The servers pass could not run ({type(e).__name__}), so the "
+            "specification was never consulted for this block."
+        )]
+
+    if not decision.url:
+        logger.info(f"Patcher → no server in the specification: {decision.rationale[:120]}")
+        return [placeholder_servers(
+            decision.rationale
+            or "The specification states no server for this service."
+        )]
+
+    server: Dict[str, Any] = {"url": decision.url}
+    if decision.description:
+        server["description"] = decision.description
+    if decision.variables:
+        # description before default, the order the published specs use.
+        server["variables"] = {
+            v.name: {
+                key: value
+                for key, value in (("description", v.description), ("default", v.default))
+                if value or key == "default"
+            }
+            for v in decision.variables
+        }
+    logger.info(f"Patcher → servers: {decision.url}")
+    return [server]
+
+
 def _rag_query_for(target_op: Dict[str, Any], rules: List[Dict[str, Any]]) -> str:
     """Compose a short query for the RAG retriever from the op + first rules."""
     parts: List[str] = []
@@ -477,7 +549,32 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         f"{len(paths_block)} path block(s), {len(schemas_block)} new schema(s)"
     )
 
-    return {
+    out: Dict[str, Any] = {
         "current_fragment": fragment_dict,
         "op_iteration_count": iteration + 1,
     }
+
+    # `servers` belongs to the document, not to any one operation, so it is
+    # settled once — on the first operation that produces paths, which are what
+    # identify the service when a specification defines several. It goes
+    # straight into final_openapi rather than through the fragment, which the
+    # Assembler merges under `paths` and `components`.
+    if final_openapi is not None and not final_openapi.get("servers"):
+        document_paths = sorted(
+            set(final_openapi.get("paths") or {}) | set(paths_block)
+        )
+        if document_paths:
+            spec_text = ""
+            spec_path = state.get("spec_doc_path") or ""
+            if spec_path:
+                try:
+                    spec_text = Path(spec_path).read_text(encoding="utf-8")
+                except Exception as e:
+                    logger.warning(f"Patcher → could not read the spec for servers: {e}")
+            updated = copy.deepcopy(final_openapi)
+            updated["servers"] = _decide_servers(
+                llm, retriever, spec_text, document_paths
+            )
+            out["final_openapi"] = updated
+
+    return out

@@ -190,3 +190,66 @@ patcher_prompt = ChatPromptTemplate.from_messages([
     ("system", _SYSTEM),
     ("human", _USER),
 ])
+
+
+# ── servers pass ──────────────────────────────────────────────────────────
+# Runs once per document, and only when no rule in the bank defines `servers`.
+# Reading a specification for where a service is hosted is a judgement task:
+# one service states a URI template, another says only that its address comes
+# from a subscription, and a pattern written for the first shape answers the
+# second with a sibling service's prefix — plausible and wrong. Hence an LLM
+# over the URI clauses plus RAG, rather than a parser.
+
+_SERVERS_SYSTEM = """\
+You are an expert in 3GPP technical specifications and OpenAPI 3.0 design.
+
+Determine the `servers` entry for ONE OpenAPI document: where the service it
+describes is hosted.
+
+A resource URI splits in two. The leading part locates the SERVICE and belongs
+in `servers.url`; the trailing part identifies a RESOURCE and belongs in
+`paths`. The specification itself marks the boundary in how it defines each URI
+variable: one defined BY REFERENCE to another clause or document (wordings such
+as "See clause 4.4.2 of TS 32.158") is infrastructure and belongs to the server,
+while one explained in prose ("Identifier of the targeted resource") identifies
+a resource and stays in the path. Cut after the last infrastructure variable.
+
+The paths already generated for this document tell you WHICH service it is
+about — a specification often defines several, each with its own server. Prefer
+the resource URI whose trailing part matches one of those paths. Ignore URIs
+belonging to other services, however similar.
+
+Return url="" when the specification declares no server for this service. That
+is a real case, not a failure: a notification sink hosted on the CONSUMER side,
+whose address arrives through a subscription, states no server the producer
+could name. Saying so is right; borrowing another service's prefix is not.
+
+Ground every part of your answer in the passages given. Never invent a
+hostname, a version, or a variable the specification does not name. Leave a
+variable's `default` empty unless the text states a value.
+
+Write `rationale` and `description` in English, whatever language the
+specification is written in: both are carried into the published document —
+`rationale` becomes the note explaining a placeholder to whoever opens the
+YAML — and an OpenAPI document is read by an international audience. Keep the
+rationale to a few sentences, and say plainly which passage settled the
+question, or why the specification states no server.
+"""
+
+_SERVERS_USER = """\
+PATHS ALREADY IN THIS DOCUMENT:
+{document_paths}
+
+RESOURCE URI CLAUSES FOUND IN THE SPECIFICATION:
+{uri_clauses}
+
+3GPP CONTEXT (retrieved passages; may be empty):
+{rag_context}
+
+Produce the ServerDecision now.
+"""
+
+patcher_servers_prompt = ChatPromptTemplate.from_messages([
+    ("system", _SERVERS_SYSTEM),
+    ("human", _SERVERS_USER),
+])
