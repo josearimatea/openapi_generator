@@ -133,6 +133,27 @@ def _write_final_yaml(final_openapi: Dict[str, Any], target_path: str) -> str:
         for key, value in final_openapi.items()
         if value or key in ("openapi", "info", "paths")
     }
+    # What the run spent, recorded in the document itself rather than only in a
+    # log — the same place openapi_rulesbank puts it in its bank's metadata, so
+    # a generated artefact carries the cost of generating it. Written on every
+    # pass, so the figure is always the total so far.
+    try:
+        from openapi_generator.config.llm_config import usage_tracker
+        from openapi_generator.config.settings import runtime_seconds
+        usage = {"runtime_seconds": round(runtime_seconds(), 1), **usage_tracker.as_dict()}
+        info = document.get("info")
+        if usage["llm_calls"] and isinstance(info, dict) \
+                and isinstance(info.get("x-openapi-generator"), dict):
+            # Copy down to the block being changed: the shallow filter above
+            # shares `info` with the accumulator in the state, and a figure
+            # meant for the file should not become part of the state.
+            document["info"] = {
+                **info,
+                "x-openapi-generator": {**info["x-openapi-generator"], "usage": usage},
+            }
+    except Exception as e:  # never let bookkeeping block a written document
+        logger.debug(f"Assembler → usage unavailable: {e}")
+
     text = yaml.dump(
         document,
         Dumper=_IndentedDumper,
@@ -148,6 +169,31 @@ def _write_final_yaml(final_openapi: Dict[str, Any], target_path: str) -> str:
     with p.open("w", encoding="utf-8") as f:
         f.write(text)
     logger.info(f"Assembler → wrote final OpenAPI to {p}")
+
+    # Report what the run has spent so far. The document is written after every
+    # operation, so this doubles as progress: a long plan shows its cost
+    # climbing rather than arriving as one number at the end.
+    try:
+        from openapi_generator.config.llm_config import usage_tracker
+        from openapi_generator.config.settings import runtime_seconds
+        usage = usage_tracker.as_dict()
+        if usage["llm_calls"]:
+            logger.info(
+                f"Assembler → {runtime_seconds():.0f}s in, "
+                f"{usage['llm_calls']} call(s), "
+                f"{usage['total_tokens']:,} tokens "
+                f"({usage['prompt_tokens']:,} prompt / "
+                f"{usage['completion_tokens']:,} completion"
+                + (f", {usage['reasoning_tokens']:,} reasoning"
+                   if usage["reasoning_tokens"] else "")
+                + (f", {usage['cached_prompt_tokens']:,} cached"
+                   if usage["cached_prompt_tokens"] else "")
+                + ")"
+                + (f" — US$ {usage['cost_usd']:.4f}" if usage["cost_usd"] else "")
+            )
+    except Exception as e:  # never let reporting break a written document
+        logger.debug(f"Assembler → usage unavailable: {e}")
+
     return str(p)
 
 
