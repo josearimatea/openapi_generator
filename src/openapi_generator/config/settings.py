@@ -9,6 +9,7 @@ Filesystem paths live in `paths.py` and are re-exported here for convenience.
 """
 
 import os
+import time
 
 from dotenv import load_dotenv
 
@@ -16,15 +17,42 @@ from .paths import *  # noqa: F401,F403 — re-export ROOT, DATA_DIR, TEST_*_PAT
 
 load_dotenv()
 
+# ── Run clock ─────────────────────────────────────────────────────
+# Set when settings first load, which every run does before anything else, so
+# how long a generation took needs no clock started or stopped by hand.
+STARTED_AT = time.perf_counter()
+
+
+def runtime_seconds() -> float:
+    """Seconds since this run began."""
+    return time.perf_counter() - STARTED_AT
+
 # ── LLM ───────────────────────────────────────────────────────────
+# Both providers speak the OpenAI chat-completions protocol, so the only
+# difference is which key and base URL the client is built with. "openai"
+# leaves the base URL unset and lets the SDK use its own default.
+PROVIDER = os.getenv("OPENAPI_GEN_PROVIDER", "openai").strip().lower()
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = os.getenv(
+    "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+)
+# OpenRouter attributes usage to an app when these are sent; both optional.
+OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "")
+OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "openapi-generator")
+
 MODEL = os.getenv("OPENAPI_GEN_MODEL", "gpt-4.1-mini")
 TEMPERATURE = float(os.getenv("OPENAPI_GEN_TEMPERATURE", "0"))
-# Reasoning models reject function-calling tools on /v1/chat/completions unless
-# reasoning is switched off, and every node here uses structured output via
-# function calling. Empty means "omit the parameter", which is what models
-# without a reasoning mode expect.
-REASONING_EFFORT = os.getenv("OPENAPI_GEN_REASONING_EFFORT", "")
+# "none" and empty both mean OMIT the reasoning parameter, letting the model do
+# whatever it does by default. That is not the same as switching reasoning off:
+# openapi_rulesbank measured the disable flag producing worse answers than
+# leaving the parameter out, on the same prompt at temperature 0.
+REASONING_EFFORT = os.getenv("OPENAPI_GEN_REASONING_EFFORT", "none").strip().lower()
+
+# A node that hangs stalls the whole run, and a plan has one call per operation.
+LLM_REQUEST_TIMEOUT = int(os.getenv("OPENAPI_GEN_LLM_TIMEOUT", "60"))
+LLM_MAX_RETRIES = int(os.getenv("OPENAPI_GEN_LLM_MAX_RETRIES", "2"))
 
 # ── Qdrant (RAG — optional) ───────────────────────────────────────
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
