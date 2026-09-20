@@ -325,28 +325,77 @@ def _local_ref_name(node: Any) -> Optional[str]:
     return None
 
 
-def _orphan_schemas_yaml(document: Dict[str, Any], covered: set) -> str:
-    """Schemas no operation reached, so nothing is reviewed only by omission."""
+def _unreviewed_yaml(
+    document: Dict[str, Any], covered: set, reviewed_ops: List[Tuple[str, str]]
+) -> str:
+    """Whatever the per-operation passes did not reach.
+
+    The passes before this one are driven by the plan: one slice per operation
+    the Planner listed. Anything the plan does not name is therefore invisible
+    to them — and being invisible is exactly the condition of the defects worth
+    finding. A key sitting under `paths` that is not a path, an operation the
+    document grew that no plan entry claims, a schema nothing references: none
+    of them belong to an operation, so none of them would ever be looked at.
+
+    Nothing is exempt from review by omission. What no slice covered is
+    gathered here and reviewed like any other part — the reviewer decides
+    whether it is a defect, as it does everywhere else.
+    """
+    left: Dict[str, Any] = {}
+
+    paths = document.get("paths") or {}
+    claimed = {(p, m) for p, m in reviewed_ops}
+    leftover_paths: Dict[str, Any] = {}
+    for key, item in paths.items():
+        # A Path Item key begins with "/" — OpenAPI 3.0 says so. A key that
+        # does not is something else that ended up here, and the reviewer is
+        # the one to say what.
+        if not str(key).startswith("/"):
+            leftover_paths[key] = item
+            continue
+        if not isinstance(item, dict):
+            leftover_paths[key] = item
+            continue
+        rest = {
+            method: body
+            for method, body in item.items()
+            if (key, str(method).lower()) not in claimed
+            and str(method).lower() in _HTTP_METHODS
+        }
+        if rest:
+            leftover_paths[key] = rest
+    if leftover_paths:
+        left["paths"] = leftover_paths
+
     schemas = (document.get("components") or {}).get("schemas") or {}
-    left = {n: s for n, s in schemas.items() if n not in covered}
+    orphans = {n: s for n, s in schemas.items() if n not in covered}
+    if orphans:
+        left["components"] = {"schemas": orphans}
+
     if not left:
         return ""
     try:
-        return yaml.dump({"components": {"schemas": left}}, sort_keys=False,
-                         allow_unicode=True, default_flow_style=False)
+        return yaml.dump(left, sort_keys=False, allow_unicode=True,
+                         default_flow_style=False)
     except Exception:
         return ""
 
 
-def _document_yaml(document: Dict[str, Any], limit: int = 24000) -> str:
+def _document_yaml(document: Dict[str, Any]) -> str:
+    """The whole document, as the second pass has to see it.
+
+    Not truncated. This pass exists to judge the document as a whole — to
+    catch what reviewing one operation at a time cannot — and a review of the
+    first N characters is not that. Cutting the tail would silently exempt
+    whatever sits at the end from ever being reviewed, and the reviewer would
+    report finding nothing wrong there, which is worse than reporting that it
+    could not look.
+    """
     try:
-        text = yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+        return yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
     except Exception as e:
         logger.warning(f"Reflector → could not serialise the document: {e}")
         return "(the document could not be serialised)"
-    if len(text) > limit:
-        return text[:limit] + f"\n… truncated at {limit} characters"
-    return text
 
 
 # ── Node ────────────────────────────────────────────────────────────────────
@@ -391,12 +440,14 @@ def reflector_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
 
     covered: set = set()
     cleared: List[str] = []
+    reviewed_ops: List[Tuple[str, str]] = []
     for op in plan:
         path, method = op.get("path") or "", (op.get("method") or "").lower()
         if not path or not method:
             continue
         part = _slice_for(document, path, method)
         covered.update(_schemas_reached_by(document, path, method))
+        reviewed_ops.append((path, method))
 
         rule_ids = [rid for rid in (op.get("source_rule_ids") or []) if 0 <= rid < len(rules)]
         op_rules, _ = _build_rules_block(rules, rule_ids)
@@ -428,23 +479,34 @@ def reflector_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         except Exception as e:
             logger.error(f"Reflector → pass over {method} {path} failed: {e}", exc_info=True)
 
-    orphans = _orphan_schemas_yaml(document, covered)
-    if orphans:
+    unreviewed = _unreviewed_yaml(document, covered, reviewed_ops)
+    if unreviewed:
         try:
             review = chain.invoke({
-                "operation": "schemas no operation references",
-                "document_yaml": orphans,
+                "operation": "parts of the document no operation pass covered",
+                "document_yaml": unreviewed,
                 "rules_by_operation": rules_block,
                 "rule_type_guide": RULE_TYPE_GUIDE,
-                "structural_report": _format_problems(
-                    [p for p in structural if p["where"].startswith("components")]
-                ),
+                # Everything the walk found outside the operations reviewed
+                # above: this pass is what stands between those findings and
+                # never being read.
+                "structural_report": _format_problems([
+                    p for p in structural
+                    if not any(
+                        p["where"].startswith(f"paths.{path}") for path, _ in reviewed_ops
+                    )
+                ]),
                 "rag_context": spec_context or "(no 3GPP context)",
                 "openapi_reference": reference or "(no OpenAPI reference)",
             })
-            first.extend(issue.model_dump() for issue in review.issues)
+            found = [issue.model_dump() for issue in review.issues]
+            first.extend(found)
+            logger.info(
+                f"Reflector → parts no operation covered: "
+                + (f"{len(found)} issue(s)" if found else "nothing to report")
+            )
         except Exception as e:
-            logger.error(f"Reflector → pass over unreferenced schemas failed: {e}", exc_info=True)
+            logger.error(f"Reflector → pass over uncovered parts failed: {e}", exc_info=True)
 
     logger.info(f"Reflector → first pass over {len(plan)} operation(s): {len(first)} issue(s)")
 
