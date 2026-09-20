@@ -395,6 +395,34 @@ class LoaderDocumentMetadata(BaseModel):
             "reservation, exactly as worded."
         ),
     )
+    service_title: str = Field(
+        default="",
+        description=(
+            "How the document should name the service the target identifies: "
+            "the full name the passages write for it, or the short name "
+            "itself when they never write it out. Empty when no target was "
+            "given, or when the target names no service this specification "
+            "defines."
+        ),
+    )
+    service_recognised: bool = Field(
+        default=True,
+        description=(
+            "Whether the passages show this specification defining the "
+            "service the target names. False when they do not — a target that "
+            "belongs to another specification, or is misspelt, must not be "
+            "answered with a plausible name. True when no target was given, "
+            "since there is then nothing to contradict."
+        ),
+    )
+    services_defined: List[str] = Field(
+        default_factory=list,
+        description=(
+            "The services this specification defines, as the passages name "
+            "them. Reported so a target that matches none can be answered "
+            "with the alternatives instead of a guess."
+        ),
+    )
 
 
 class PatcherServerVariable(BaseModel):

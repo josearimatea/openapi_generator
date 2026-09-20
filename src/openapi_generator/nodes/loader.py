@@ -37,7 +37,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openapi_generator.config import get_logger
-from openapi_generator.utils.parsers import parse_sections
+from openapi_generator.rag.spec_index import index_spec_sections
+from openapi_generator.utils.parsers import normative_only, parse_sections
 
 logger = get_logger(__name__)
 
@@ -54,6 +55,11 @@ def _empty_skeleton() -> Dict[str, Any]:
     from openapi_generator.config.settings import OPENAPI_VERSION
 
     return {
+        # How this document was produced, ahead of the document itself: a
+        # reader meets the machinery first and then an OpenAPI that reads
+        # exactly like a hand-written one, rather than finding generator
+        # bookkeeping wedged between `info` and the title it announces.
+        "x-ai-generation": {},
         "openapi": OPENAPI_VERSION,
         "info": {},
         "externalDocs": {},
@@ -63,28 +69,63 @@ def _empty_skeleton() -> Dict[str, Any]:
     }
 
 
-def _document_blocks(spec_text: str, openapi_version: str, llm=None) -> Dict[str, Any]:
+def _document_blocks(
+    cover_text: str,
+    openapi_version: str,
+    target: str = "",
+    spec_collection: str = "",
+    llm=None,
+) -> Dict[str, Any]:
     """`info` and `externalDocs` values stated on the specification's cover.
 
     No rule covers these — they describe the document rather than the API — but
     the specification states them outright on its cover page, so they are read
     from there rather than left blank or invented. What the cover does not say
     is simply omitted.
+
+    Takes the document as it is, not its normative text: the cover sits above
+    the contents listing, which is exactly what the reduction to normative text
+    drops.
     """
     from openapi_generator.utils.servers import document_metadata
 
-    meta = document_metadata(spec_text, llm)
+    meta = document_metadata(cover_text, target, spec_collection, llm)
     if not meta:
         return {}
 
+    # A target this specification does not define stops the run. Generating
+    # anyway would title the document after a service that is not here and
+    # produce something plausible and wrong; the services the specification
+    # does define are named so the run can be corrected.
+    if meta.get("service_unrecognised"):
+        defined = meta.get("services_defined") or []
+        raise ValueError(
+            f"The specification does not define a service named "
+            f"{meta['service_unrecognised']!r}. "
+            + (
+                f"It defines: {', '.join(defined)}."
+                if defined
+                else "No service name could be read from it."
+            )
+        )
+
     info: Dict[str, Any] = {}
     number, subject = meta.get("number"), meta.get("subject")
-    if number:
+    # The title names the SERVICE this document describes, which is what a
+    # published OpenAPI carries. The specification's own title is a fallback
+    # for a run that named no target: better a document identified by the
+    # specification it came from than one with no title at all.
+    service = meta.get("service_title")
+    if service:
+        info["title"] = service
+    elif number:
         info["title"] = f"TS {number}" + (f" {subject}" if subject else "")
     if meta.get("version"):
         info["version"] = meta["version"]
 
-    described = f"TS {number} {subject}" if number and subject else "the service"
+    described = service or (
+        f"TS {number} {subject}" if number and subject else "the service"
+    )
     description = f"OAS {openapi_version} definition of {described}"
     if meta.get("copyright"):
         description += f" {meta['copyright']}"
@@ -100,12 +141,14 @@ def _document_blocks(spec_text: str, openapi_version: str, llm=None) -> Dict[str
 
 
 def _provenance(rules_bank: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """How this document was produced, as one `x-openapi-generator` block.
+    """How this document was produced, as one `x-ai-generation` block.
 
-    Kept as a single extension rather than a spread of sibling `x-` keys so
-    that `info` still reads like the specification's own: title, version and
-    description where a reader expects them, with the machinery gathered under
-    one key that can be skipped over — or dropped — without touching the rest.
+    Kept as a single extension at the top of the document rather than a spread
+    of `x-` keys inside `info`: the generation record is about the file, not
+    about the API it describes, and `info` then reads like the specification's
+    own — title, version and description where a reader expects them. Gathered
+    under one key, the machinery can be skipped over, or dropped, without
+    touching the rest.
 
     Two stages are recorded because they are genuinely separate: the rules bank
     was produced by openapi_rulesbank, possibly by another model on another
@@ -139,7 +182,9 @@ def _provenance(rules_bank: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 def _seed_final_openapi(
     legacy_openapi: Optional[Dict[str, Any]],
     rules_bank: Optional[Dict[str, Any]],
-    spec_text: str = "",
+    cover_text: str = "",
+    target: str = "",
+    spec_collection: str = "",
     llm=None,
 ) -> Dict[str, Any]:
     """Decide whether to start from the legacy spec or an empty skeleton."""
@@ -150,22 +195,18 @@ def _seed_final_openapi(
             f"{len(((legacy_openapi.get('components') or {}).get('schemas') or {}))} schema(s))"
         )
         seeded = copy.deepcopy(legacy_openapi)
-        # Keep the legacy's own info and record only how this run was produced.
-        seeded["info"] = {
-            "x-openapi-generator": _provenance(rules_bank),
-            **(seeded.get("info") or {}),
-        }
-        return seeded
+        # The legacy document keeps its own `info` untouched; only how this run
+        # was produced is added, and it goes above the document rather than
+        # inside it.
+        return {"x-ai-generation": _provenance(rules_bank), **seeded}
 
     skeleton = _empty_skeleton()
-    # Provenance first, then what the specification says the document is: the
-    # generated file announces its machinery up front and reads like the
-    # original from there on.
-    blocks = _document_blocks(spec_text, skeleton["openapi"], llm) if spec_text else {}
-    skeleton["info"] = {
-        "x-openapi-generator": _provenance(rules_bank),
-        **blocks.get("info", {}),
-    }
+    blocks = (
+        _document_blocks(cover_text, skeleton["openapi"], target, spec_collection, llm)
+        if cover_text else {}
+    )
+    skeleton["x-ai-generation"] = _provenance(rules_bank)
+    skeleton["info"] = blocks.get("info", {})
     if blocks.get("externalDocs"):
         skeleton["externalDocs"] = blocks["externalDocs"]
     logger.info(
@@ -182,12 +223,21 @@ def loader_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
     spec_path = state.get("spec_doc_path", "")
     parsed_sections: List[Dict[str, Any]] = []
     spec_text = ""
+    cover_text = ""
 
     if spec_path:
         p = Path(spec_path)
         if p.exists():
             try:
-                spec_text = text = p.read_text(encoding="utf-8")
+                # The cover page is read from the document as it is, and
+                # everything else from its normative text. The two cannot be
+                # the same string: `normative_only` drops the contents listing
+                # along with the annexes, and the cover sits above the
+                # listing — so reducing first would take the cover with it and
+                # leave the document without a version or a copyright.
+                raw = p.read_text(encoding="utf-8")
+                cover_text = raw
+                spec_text = text = normative_only(raw)
                 parsed_sections, excluded = parse_sections(text)
                 logger.info(
                     f"Loader → parsed {len(parsed_sections)} sections from {p.name} "
@@ -209,11 +259,26 @@ def loader_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         f"legacy_openapi: {'present' if legacy_openapi else 'absent'}"
     )
 
+    # Index this specification before anything reads it. Some questions can
+    # only be answered from the document at hand — what it calls the service,
+    # where it says the service is hosted — and they are answered by meaning
+    # rather than by pattern. The collection lasts this run; the Assembler
+    # drops it when the document is final.
+    spec_collection = index_spec_sections(parsed_sections) if parsed_sections else ""
+
     return {
         "parsed_spec_sections": parsed_sections,
+        "spec_collection": spec_collection,
         "current_op_idx": 0,
         "op_iteration_count": 0,
         "validated_fragments_by_op": {},
         "validation_errors": [],
-        "final_openapi": _seed_final_openapi(legacy_openapi, rules_bank, spec_text, llm),
+        "final_openapi": _seed_final_openapi(
+            legacy_openapi,
+            rules_bank,
+            cover_text,
+            state.get("target_mns", ""),
+            spec_collection,
+            llm,
+        ),
     }

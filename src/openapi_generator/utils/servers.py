@@ -54,14 +54,10 @@ logger = get_logger(__name__)
 # "Resource URI:" then the template, on the same line or the next one.
 _RESOURCE_URI = re.compile(r"Resource URI:[ \t]*\n?[ \t]*(\S[^\n]*)", re.IGNORECASE)
 
-# Where the annexes begin; everything from there on is out of bounds.
-_ANNEX_START = re.compile(r"^#*\s*Annex\s+[A-Z]\b", re.IGNORECASE | re.MULTILINE)
-
-
-def _normative_text(spec_text: str) -> str:
-    """The specification with its annexes removed."""
-    matches = list(_ANNEX_START.finditer(spec_text))
-    return spec_text[: matches[-1].start()] if matches else spec_text
+# The text reaching this module is already normative-only: the Loader strips
+# the contents listing and the annexes once, when it reads the document (see
+# utils.parsers.normative_only), so nothing here has to cut them again — and
+# nothing here can reach the annex that embeds the finished OpenAPI documents.
 
 
 def _uri_variables(spec_text: str) -> Dict[str, str]:
@@ -84,17 +80,28 @@ def _clean(text: str) -> str:
     return re.sub(r"\\([\[\]()*_])", r"\1", text).strip()
 
 
-def uri_clauses(spec_text: str, document_paths: Optional[List[str]] = None) -> str:
+def uri_clauses(
+    spec_text: str,
+    document_paths: Optional[List[str]] = None,
+    spec_collection: str = "",
+) -> str:
     """Gather the specification passages that bear on where the service lives.
 
-    This only COLLECTS; it decides nothing. A regex can find a clause laid out
-    the way this drafting convention expects, but it cannot read a service
-    whose address is described in prose — the sink whose URI "is provided by
-    the notification subscription" states no template to match, and a pattern
-    looking for templates will either miss it or, worse, latch onto a sibling
-    service's URI and hand back a plausible wrong answer. So the passages found
-    here are evidence for the LLM to weigh alongside what the RAG retrieves,
-    not a conclusion.
+    This only COLLECTS; it decides nothing. Two kinds of evidence, because the
+    specification states the answer in two shapes.
+
+    The first is the URI table, and it is gathered by pattern because of what
+    the pattern does with it: each template is paired with the definitions of
+    the variables it uses, and that pairing is the whole point — a variable
+    defined by reference to another clause is infrastructure and belongs to
+    the server, one explained in prose identifies a resource and stays in the
+    path. Retrieval returns passages, not pairings, and would hand over a
+    template whose variables are explained three sections away.
+
+    The second is prose, and no pattern reaches it: a service whose address
+    "is provided by the notification subscription" states no template at all.
+    A search for the words is what finds that, so the two are gathered
+    together and weighed by the LLM.
 
     When `document_paths` are given, clauses whose URI ends with one of them
     come first: in a specification defining several services, that is the
@@ -102,7 +109,7 @@ def uri_clauses(spec_text: str, document_paths: Optional[List[str]] = None) -> s
     suffix needs no list of service names and does not care how many services
     the document defines.
     """
-    body = _normative_text(spec_text)
+    body = spec_text
     variables = _uri_variables(body)
 
     matched: List[str] = []
@@ -132,10 +139,51 @@ def uri_clauses(spec_text: str, document_paths: Optional[List[str]] = None) -> s
     if others:
         lines.append("Other resource URIs stated in the specification:")
         lines.extend(others[:12])
+
+    if spec_collection:
+        from openapi_generator.rag.spec_index import search_spec
+
+        retrieved = search_spec(
+            "where this service is hosted: resource URI structure, the root of "
+            "the address, how a consumer learns the address",
+            spec_collection,
+        )
+        if retrieved:
+            lines.append("")
+            lines.append("Passages on how this service is addressed:")
+            lines.append(retrieved)
+
     return "\n".join(lines) if lines else "(the specification states no resource URI template)"
 
 
-def document_metadata(spec_text: str, llm=None) -> Dict[str, Any]:
+def _service_mentions(target: str, spec_collection: str) -> str:
+    """Passages of this specification bearing on what the service is called.
+
+    Retrieved rather than matched. The short name a run is given appears
+    mostly inside URI templates and mapping tables, which identify the service
+    without ever expanding it, while the full name is written in the prose of
+    the clauses that define it — the two rarely in the same sentence. A
+    pattern tuned until it finds one specification's phrasing is tuned to that
+    specification, and the next one words it differently.
+
+    The collection holds normative text only, so the annex embedding the
+    finished OpenAPI document — whose `title:` line is literally the answer —
+    cannot be retrieved.
+    """
+    if not target.strip() or not spec_collection:
+        return ""
+
+    from openapi_generator.rag.spec_index import search_spec
+
+    return search_spec(
+        f"{target} management service: the name of this service and what it does",
+        spec_collection,
+    )
+
+
+def document_metadata(
+    spec_text: str, target: str = "", spec_collection: str = "", llm=None
+) -> Dict[str, Any]:
     """Read `info` and `externalDocs` values off the specification's cover page.
 
     The cover states the document number, its version, its subject and the
@@ -165,7 +213,11 @@ def document_metadata(spec_text: str, llm=None) -> Dict[str, Any]:
         chain = loader_metadata_prompt | llm.with_structured_output(
             LoaderDocumentMetadata, method="function_calling"
         )
-        read: LoaderDocumentMetadata = chain.invoke({"cover_page": cover})
+        read: LoaderDocumentMetadata = chain.invoke({
+            "cover_page": cover,
+            "target": target or "(none given)",
+            "service_mentions": _service_mentions(target, spec_collection) or "(none)",
+        })
     except Exception as e:
         logger.warning(f"cover-page pass failed ({type(e).__name__}: {e})")
         return {}
@@ -178,9 +230,15 @@ def document_metadata(spec_text: str, llm=None) -> Dict[str, Any]:
             ("release", read.release.strip()),
             ("subject", read.subject.strip()),
             ("copyright", " ".join(read.copyright.split())),
+            ("service_title", " ".join(read.service_title.split())),
         )
         if value
     }
+
+    if target.strip() and not read.service_recognised:
+        out.pop("service_title", None)
+        out["service_unrecognised"] = target
+        out["services_defined"] = [s for s in read.services_defined if s.strip()]
 
     number = out.get("number", "")
     if re.fullmatch(r"\d{2}\.\d{3}", number):

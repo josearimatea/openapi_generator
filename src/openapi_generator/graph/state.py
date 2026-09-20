@@ -30,11 +30,19 @@ class OpenAPIGenState(TypedDict, total=False):
     spec_doc_path: str                    # path to the 3GPP markdown spec (e.g. 28532-i00.md)
     rules_bank: Dict[str, Any]            # parsed rules_bank JSON for this spec
     legacy_openapi: Optional[Dict[str, Any]]   # parsed legacy OpenAPI YAML (optional)
+    # Short name of the management service this document covers (e.g. ProvMnS).
+    # A specification defines several and this document covers one, so the name
+    # settles what info.title says. Empty when the run did not name one.
+    target_mns: str
     openapi_target_path: str              # where the final YAML will be saved
 
     # ── Loader output ─────────────────────────────────────────
     # Sections parsed from spec_doc_path: [{section_id, title, content}]
     parsed_spec_sections: List[Dict[str, Any]]
+    # Qdrant collection holding this run's specification, created by the Loader
+    # and dropped by the Assembler. Empty when indexing was unavailable, which
+    # every consumer treats as "no spec RAG" rather than as an error.
+    spec_collection: str
 
     # ── Planner output ────────────────────────────────────────
     # List of operations to generate, ordered. Each item:

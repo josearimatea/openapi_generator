@@ -81,8 +81,9 @@ def _deep_merge(dst: Dict[str, Any], src: Dict[str, Any], path: str = "") -> Non
 
 
 
-_GENERATOR_KEY = "  x-openapi-generator:"
-_SEPARATOR = "  # " + "-" * 68
+_GENERATOR_KEY = "x-ai-generation:"
+_HEADING = "# AI generation information — how this document was produced"
+_SEPARATOR = "# " + "-" * 70
 
 
 class _IndentedDumper(yaml.SafeDumper):
@@ -98,12 +99,12 @@ class _IndentedDumper(yaml.SafeDumper):
 
 
 def _rule_after_generator_block(text: str) -> str:
-    """Draw a comment rule where the generator's own block ends.
+    """Head and close the generation block with comments.
 
-    `info` opens with how the document was produced and continues with what the
-    specification says it is. The two read as one list otherwise, so a rule is
-    inserted at the boundary: the first line after the x-openapi-generator
-    block that is indented as a sibling key.
+    The document opens with how it was produced and continues with the OpenAPI
+    proper. Read as one list the two run together, so the block is announced by
+    a heading and closed by a rule where the next top-level key begins — after
+    which the file reads exactly like a hand-written OpenAPI document.
     """
     lines = text.splitlines()
     try:
@@ -111,14 +112,15 @@ def _rule_after_generator_block(text: str) -> str:
     except StopIteration:
         return text
 
+    # A top-level key is written flush left, so the block ends at the first
+    # such line after it.
     for i in range(start + 1, len(lines)):
         line = lines[i]
-        if line.strip() and not line.startswith("    "):
-            if not line.startswith("  "):
-                break  # info ended without any spec field following
+        if line.strip() and not line.startswith((" ", "-")):
             lines.insert(i, _SEPARATOR)
-            return "\n".join(lines) + "\n"
-    return text
+            break
+    lines.insert(start, _HEADING)
+    return "\n".join(lines) + "\n"
 
 
 def _write_final_yaml(final_openapi: Dict[str, Any], target_path: str) -> str:
@@ -141,16 +143,12 @@ def _write_final_yaml(final_openapi: Dict[str, Any], target_path: str) -> str:
         from openapi_generator.config.llm_config import usage_tracker
         from openapi_generator.config.settings import runtime_seconds
         usage = {"runtime_seconds": round(runtime_seconds(), 1), **usage_tracker.as_dict()}
-        info = document.get("info")
-        if usage["llm_calls"] and isinstance(info, dict) \
-                and isinstance(info.get("x-openapi-generator"), dict):
-            # Copy down to the block being changed: the shallow filter above
-            # shares `info` with the accumulator in the state, and a figure
-            # meant for the file should not become part of the state.
-            document["info"] = {
-                **info,
-                "x-openapi-generator": {**info["x-openapi-generator"], "usage": usage},
-            }
+        generation = document.get("x-ai-generation")
+        if usage["llm_calls"] and isinstance(generation, dict):
+            # Copy rather than mutate: the shallow filter above shares this
+            # block with the accumulator in the state, and a figure meant for
+            # the file should not become part of the state.
+            document["x-ai-generation"] = {**generation, "usage": usage}
     except Exception as e:  # never let bookkeeping block a written document
         logger.debug(f"Assembler → usage unavailable: {e}")
 
@@ -161,10 +159,8 @@ def _write_final_yaml(final_openapi: Dict[str, Any], target_path: str) -> str:
         allow_unicode=True,
         default_flow_style=False,
     )
-    # safe_dump writes no comments, so the rule separating how the document was
-    # produced from what it describes is drawn afterwards. It sits between the
-    # x-openapi-generator block and the specification's own info fields, which
-    # the Loader ordered that way.
+    # safe_dump writes no comments, so the heading and the rule that set the
+    # generation block apart from the document are drawn afterwards.
     text = _rule_after_generator_block(text)
     with p.open("w", encoding="utf-8") as f:
         f.write(text)

@@ -80,6 +80,18 @@ QDRANT_TIMEOUT = 30  # seconds — kept short so a down Qdrant fails fast
 # default; override when targeting a different release.
 OPENAPI_VERSION = os.getenv("OPENAPI_GEN_OPENAPI_VERSION", "3.0.1")
 
+# ── Spec RAG (rag.spec_index) ─────────────────────────────────────
+# The specification being processed is indexed into a collection of its own,
+# created per run and dropped when the run ends. It answers what only this
+# document can answer — the service's full name, where the service is hosted —
+# which is stated in prose whose position no pattern can predict.
+SPEC_COLLECTION_PREFIX = "spec_tmp_"
+# Large enough that a clause is not split mid-definition, overlapped so a
+# sentence spanning a boundary is still retrievable whole.
+SPEC_CHUNK_SIZE = int(os.getenv("OPENAPI_GEN_SPEC_CHUNK_SIZE", "1000"))
+SPEC_CHUNK_OVERLAP = int(os.getenv("OPENAPI_GEN_SPEC_CHUNK_OVERLAP", "200"))
+SPEC_RETRIEVE_CHUNKS = int(os.getenv("OPENAPI_GEN_SPEC_RETRIEVE_CHUNKS", "8"))
+
 # ── Rule gating (nodes.patcher) ───────────────────────────────────
 # A rules_bank rule the bank's Validator rejected is still force-included by its
 # Builder at MAX_ITERATIONS, so the Patcher decides what to do with it from the

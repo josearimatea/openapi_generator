@@ -72,6 +72,18 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--target",
+        default=None,
+        metavar="MnS",
+        help=(
+            "The management service this document describes, as the "
+            "specification names it (e.g. ProvMnS). A specification defines "
+            "several and this document covers one, so the name decides what "
+            "info.title says. Optional once the rules bank records the target "
+            "it was built for; given here, it takes precedence."
+        ),
+    )
+    parser.add_argument(
         "--legacy-openapi",
         default=None,
         metavar="PATH",
@@ -133,22 +145,30 @@ def main() -> None:
     output_path = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    logger.info("Starting OpenAPI generation pipeline.")
-    logger.info(f"  Spec doc      : {spec_doc_path}")
-    logger.info(f"  Rules bank    : {rules_bank_path}")
-    logger.info(f"  Legacy OpenAPI: {legacy_path or '(none)'}")
-    logger.info(f"  Output        : {output_path}")
-
     # File parsing happens here, not inside the graph: the graph contract
     # works with already-parsed dicts, keeping the nodes free of disk I/O
     # (except the Loader, which reads spec_doc_path directly).
     rules_bank: dict = _load_rules_bank(rules_bank_path)
     legacy_openapi: Optional[dict] = _load_legacy_openapi(legacy_path)
 
+    # The bank knows which service it was built for, so the argument is only
+    # needed when it does not say — and overrides it when both are present.
+    # (Banks produced before the field existed carry nothing, hence the
+    # argument staying available rather than being replaced by it.)
+    target = args.target or (rules_bank.get("metadata") or {}).get("target") or ""
+
+    logger.info("Starting OpenAPI generation pipeline.")
+    logger.info(f"  Spec doc      : {spec_doc_path}")
+    logger.info(f"  Rules bank    : {rules_bank_path}")
+    logger.info(f"  Target MnS    : {target or '(not given — title falls back to the specification)'}")
+    logger.info(f"  Legacy OpenAPI: {legacy_path or '(none)'}")
+    logger.info(f"  Output        : {output_path}")
+
     initial_state: dict[str, Any] = {
         "spec_doc_path": spec_doc_path,
         "rules_bank": rules_bank,
         "legacy_openapi": legacy_openapi,
+        "target_mns": target,
         "openapi_target_path": output_path,
         "messages": [],
     }
@@ -159,11 +179,19 @@ def main() -> None:
     # of using this CLI.
     pipeline = build_openapi_gen_graph()
 
+    result: dict = {}
     try:
         result = pipeline.invoke(initial_state)
     except Exception as e:
         logger.error(f"Pipeline failed: {e}", exc_info=True)
         raise
+    finally:
+        # The Loader indexes this specification into a collection of its own.
+        # Dropped here rather than in a node because the nodes run per
+        # operation and none of them is the end of the run — and in `finally`
+        # so a failed run leaves nothing behind either.
+        from openapi_generator.rag.spec_index import drop_spec_collection
+        drop_spec_collection(result.get("spec_collection", ""))
 
     # The Assembler writes the final YAML and reports its absolute path back
     # in state["final_output_path"]. Empty value = nothing was written.
