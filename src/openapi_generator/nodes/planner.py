@@ -611,6 +611,24 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
             attach = PlannerSchemaAttachment(attach_to_indices=[], rationale="LLM fallback")
 
         valid_targets = [j for j in attach.attach_to_indices if 0 <= j < len(operations)]
+        if not valid_targets and operations:
+            # A rule defining a schema is the authority that the schema belongs
+            # in the document. Which operation references it is a separate
+            # question, and answering "none" is no reason to drop the
+            # definition: components.schemas is a sibling of paths, not an
+            # appendix to it, and a specification may declare a type that no
+            # operation happens to use.
+            #
+            # Dropping them here loses the schema from the document entirely,
+            # and every $ref pointing at it breaks with it. So an unclaimed
+            # schema goes to the first operation, which merely carries it — the
+            # Patcher defines a schema wherever its rules reach it.
+            valid_targets = [0]
+            logger.info(
+                f"  Phase C schema={schema_name} → no operation claims it; "
+                "attaching to the first so the definition still reaches the document"
+            )
+
         if valid_targets:
             for j in valid_targets:
                 target = operations[j]
@@ -625,15 +643,16 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
                 f"to {len(valid_targets)} op(s)"
             )
         else:
+            # Only reachable when the plan holds no operation at all.
             for rid in idx_list:
                 rule = rules[rid]
                 explicit_gaps.append(
                     f"[rule {rid}] schema_property / {rule.get('source_name', '?')} "
-                    f"(schema {schema_name} not used by any op)"
+                    f"(schema {schema_name}: the plan has no operation to carry it)"
                 )
-            logger.info(
-                f"  Phase C schema={schema_name} → no op uses it; "
-                f"{len(idx_list)} rule(s) flagged as gaps"
+            logger.warning(
+                f"  Phase C schema={schema_name} → the plan has no operation; "
+                f"{len(idx_list)} rule(s) left as gaps"
             )
 
     # ── Gap report ──────────────────────────────────────────────────────────
