@@ -56,6 +56,7 @@ from openapi_generator.config.settings import RULE_RESCUE_CONFIDENCE
 from openapi_generator.prompts.patcher_prompts import patcher_prompt
 from openapi_generator.schemas.operation import OperationFragment
 from openapi_generator.schemas.rule_types import format_for_prompt
+from openapi_generator.utils.parsers import normative_only
 
 logger = get_logger(__name__)
 
@@ -185,12 +186,33 @@ def _legacy_fragment_for(
         return json.dumps(snippet, indent=2, ensure_ascii=False)
 
 
-def _existing_schemas_summary(final_openapi: Optional[Dict[str, Any]]) -> str:
-    schemas = ((final_openapi or {}).get("components") or {}).get("schemas") or {}
-    if not schemas:
-        return "(none yet — all schemas this operation needs must be defined here)"
-    names = sorted(schemas.keys())
-    return ", ".join(names)
+def _document_so_far(final_openapi: Optional[Dict[str, Any]]) -> str:
+    """The document as it stands, for the operation about to be written.
+
+    Operations are written one per call, and each one lands in a document the
+    calls before it have been building. Showing that document is what lets the
+    model check instead of assume: whether a schema is already defined, whether
+    a parameter is already declared on the path, what the operations written so
+    far look like.
+
+    It used to be a list of schema names, and the gap showed. A rule addressed
+    to the path describes a parameter every method shares, so it reaches every
+    call — and with no way to see that an earlier call had already written it,
+    each one wrote it again, inside its own operation. The result duplicated
+    what the path already declared and shifted the positions of everything
+    after it.
+
+    The whole document goes, not a summary of it. A summary is a guess about
+    which question will be asked next, and the guess was wrong once already.
+    """
+    document = final_openapi or {}
+    if not (document.get("paths") or (document.get("components") or {}).get("schemas")):
+        return "(nothing written yet — this is the first operation)"
+    try:
+        return yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+    except Exception as e:
+        logger.warning(f"Patcher → could not serialise the document so far: {e}")
+        return "(the document so far could not be serialised)"
 
 
 def _build_correction_task(
@@ -309,6 +331,7 @@ def _decide_servers(
     retriever,
     spec_text: str,
     document_paths: List[str],
+    spec_collection: str = "",
 ) -> List[Dict[str, Any]]:
     """Work out the document's `servers`, reading the specification.
 
@@ -341,7 +364,7 @@ def _decide_servers(
         )
         decision: PatcherServerDecision = chain.invoke({
             "document_paths": ", ".join(document_paths) or "(none yet)",
-            "uri_clauses": uri_clauses(spec_text, document_paths),
+            "uri_clauses": uri_clauses(spec_text, document_paths, spec_collection),
             "rag_context": rag_context or "(no 3GPP RAG context)",
         })
     except Exception as e:
@@ -445,15 +468,30 @@ def _apply_corrections(state: dict, llm, retriever) -> Dict[str, Any]:
         # budget in graph.conditions stops the loop.
         return {"op_iteration_count": iteration + 1, "validation_errors": []}
 
+    # A structured-output call can return None instead of raising — the model
+    # answered, but not in a shape that parsed. That reads as success and is
+    # not one, so it is checked rather than dereferenced. A round is cheap to
+    # lose; the document this run has been building is not.
+    if corrected is None:
+        logger.error(
+            "Patcher → the correction pass returned nothing that parsed; "
+            "leaving the document as it was and spending the round."
+        )
+        return {"op_iteration_count": iteration + 1, "validation_errors": []}
+
     # Take what came back key by key rather than swapping the blocks whole. The
-    # correction is asked for the entire document, but a model that returns
-    # only the part it touched would otherwise delete everything it left out —
-    # and a schema silently dropped here is far worse than a fix not applied.
-    # A removal therefore has to be asked for: `remove` fixes name what goes.
+    # correction returns only the blocks it changed, and each one replaces its
+    # counterpart here while everything else stays as it was.
+    #
+    # So the merge never removes anything. What is absent from the answer is
+    # kept, full stop: absence means "not touched", and no amount of cross-
+    # referencing with the fix list turns it into "deleted". Inferring intent
+    # from silence is what cost a whole operation once — a `remove` aimed at a
+    # response matched its ancestor by string prefix and took the operation,
+    # its callbacks and all, against a model that had reported applying
+    # nothing. Removal is now a statement the model makes, not a guess this
+    # code makes on its behalf.
     updated = copy.deepcopy(document)
-    removals = {
-        f.get("ref", "") for f in fixes if f.get("action") == "remove"
-    }
 
     def merge(into: Dict[str, Any], came_back: Dict[str, Any], at: str) -> None:
         for key, value in came_back.items():
@@ -462,20 +500,16 @@ def _apply_corrections(state: dict, llm, retriever) -> Dict[str, Any]:
                 merge(into[key], value, here)
             else:
                 into[key] = value
-        for key in list(into):
-            if key in came_back:
-                continue
-            here = f"{at}.{key}" if at else key
-            if any(r.startswith(here) for r in removals):
-                into.pop(key)
-                logger.info(f"Patcher → removed {here}")
 
     # `applied` and `skipped` are the model's report on its own work, and the
     # structured output invites it to nest them inside the blocks it returns
     # rather than beside them. They are not OpenAPI and must not reach the
     # document, so they are stripped wherever they turn up.
     def content_only(block: Dict[str, Any]) -> Dict[str, Any]:
-        return {k: v for k, v in block.items() if k not in ("applied", "skipped")}
+        return {
+            k: v for k, v in block.items()
+            if k not in ("applied", "skipped", "removed")
+        }
 
     if corrected.paths:
         merge(updated.setdefault("paths", {}), content_only(corrected.paths), "paths")
@@ -486,8 +520,35 @@ def _apply_corrections(state: dict, llm, retriever) -> Dict[str, Any]:
             "components",
         )
 
+    # Carry out the removals the model declared — and only those. A dotted path
+    # is walked segment by segment down to the parent, and the last segment is
+    # the key that goes: `a.b.c` removes `c` from `b`, never `b` from `a`.
+    #
+    # A path that does not resolve is a disagreement between what the model says
+    # it did and what the document holds, so it is logged rather than passed
+    # over. Silence here would hide both a removal that did not happen and a
+    # model describing edits it never made.
+    for path in corrected.removed:
+        segments = [s for s in path.split(".") if s]
+        if not segments:
+            continue
+        parent: Any = updated
+        for segment in segments[:-1]:
+            parent = parent.get(segment) if isinstance(parent, dict) else None
+            if parent is None:
+                break
+        if isinstance(parent, dict) and segments[-1] in parent:
+            parent.pop(segments[-1])
+            logger.info(f"Patcher → removed {path}")
+        else:
+            logger.warning(
+                f"Patcher → declared a removal of {path}, which the document "
+                "does not have; nothing was removed"
+            )
+
     logger.info(
         f"Patcher → applied {len(corrected.applied)} fix(es)"
+        + (f", removed {len(corrected.removed)}" if corrected.removed else "")
         + (f", skipped {len(corrected.skipped)}" if corrected.skipped else "")
     )
     for skipped in corrected.skipped:
@@ -581,7 +642,7 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
     if rule_buckets["drop"]:
         logger.info(f"Patcher → dropped rule ids {rule_buckets['drop']}")
     legacy_fragment = _legacy_fragment_for(legacy_openapi, path, method)
-    existing_schemas = _existing_schemas_summary(final_openapi)
+    document_so_far = _document_so_far(final_openapi)
 
     # ── RAG #1 — 3GPP spec context (optional, degrades to "") ─────
     rag_context = ""
@@ -637,7 +698,7 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
             "target_op_summary": target_op_summary,
             "applicable_rules": applicable_rules,
             "legacy_fragment": legacy_fragment or "(no legacy fragment — building from scratch)",
-            "existing_schemas": existing_schemas,
+            "document_so_far": document_so_far,
             "rule_type_guide": RULE_TYPE_GUIDE,
             "rag_context": rag_context or "(3GPP RAG unavailable for this run)",
             "openapi_reference": openapi_reference or "(OpenAPI reference RAG unavailable for this run)",
@@ -702,12 +763,18 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
             spec_path = state.get("spec_doc_path") or ""
             if spec_path:
                 try:
-                    spec_text = Path(spec_path).read_text(encoding="utf-8")
+                    # Normative text only, as the Loader reads it. The annex
+                    # holds the finished OpenAPI documents, `servers` block
+                    # included — reading it here would copy the answer.
+                    spec_text = normative_only(
+                        Path(spec_path).read_text(encoding="utf-8")
+                    )
                 except Exception as e:
                     logger.warning(f"Patcher → could not read the spec for servers: {e}")
             updated = copy.deepcopy(final_openapi)
             updated["servers"] = _decide_servers(
-                llm, retriever, spec_text, document_paths
+                llm, retriever, spec_text, document_paths,
+                state.get("spec_collection", ""),
             )
             out["final_openapi"] = updated
 

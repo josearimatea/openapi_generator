@@ -123,30 +123,58 @@ class ValidationVerdict(BaseModel):
 
 
 class PatcherCorrectedDocument(BaseModel):
-    """The document after the Patcher applied the Validator's fixes.
+    """What the Patcher changed in the document, applying the Validator's fixes.
 
-    The whole document comes back, not a fragment: the fixes touch places
-    spread across it, and some depend on each other — a schema added and the
-    $ref pointing at it — so they are applied together and returned together.
+    Only what changed comes back. The fixes are applied together, in one call,
+    because some depend on each other — a schema added and the $ref pointing at
+    it — but what is RETURNED is just the parts they touched.
+
+    Returning the whole document is what this replaced, and the reasons are
+    worth keeping. A document rewritten end to end is rewritten by a model,
+    and every untouched line it restates is a line it can quietly alter, drop
+    or duplicate; the defences against that (merging key by key, stripping the
+    model's own report out of the YAML, refusing removals nobody asked for)
+    all existed to contain a rewrite nobody wanted. The cost also grew with
+    the document, so the better the pipeline got at filling it, the closer the
+    correction call came to its timeout — and past it, a round returned
+    nothing at all.
     """
 
     paths: Dict[str, Any] = Field(
         default_factory=dict,
-        description="The complete `paths` block, corrected.",
+        description=(
+            "Only the path items this correction changed, keyed by path — and "
+            "within each, only the methods that changed. A path left out is "
+            "left alone. Empty when no fix touched `paths`."
+        ),
     )
     components: Dict[str, Any] = Field(
         default_factory=dict,
-        description="The complete `components` block, corrected.",
+        description=(
+            "Only the schemas this correction changed or added, under "
+            "`schemas`. A schema left out is left alone. Empty when no fix "
+            "touched `components`."
+        ),
     )
     applied: List[str] = Field(
         default_factory=list,
         description="Dotted path of each fix applied.",
     )
+    removed: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Dotted path of everything deliberately taken out of the document, "
+            "one entry per place removed, naming exactly what went and nothing "
+            "above it. A place left out of the returned blocks is kept unless "
+            "it is listed here, so anything meant to disappear must be named."
+        ),
+    )
     skipped: List[str] = Field(
         default_factory=list,
         description=(
             "Fixes left unapplied, each with its reason — the place was not "
-            "where the fix said, or the instruction contradicted the document."
+            "where the fix said, the instruction contradicted the document, or "
+            "the removal would have cost more than the problem it solved."
         ),
     )
 

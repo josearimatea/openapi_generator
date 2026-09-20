@@ -17,8 +17,11 @@ Inputs interpolated into the prompt:
     legacy_fragment      — pretty-printed legacy YAML fragment for this
                            (path, method) when action != 'create'; empty
                            string otherwise.
-    existing_schemas     — names of schemas already in final_openapi so the
-                           Patcher reuses them via $ref instead of redefining.
+    document_so_far      — the document the calls before this one have built,
+                           whole. Operations are written one per call into a
+                           shared document, and this is what lets the model
+                           check rather than assume: whether a schema is
+                           defined, whether a parameter is already on the path.
     rag_context          — 3GPP chunks retrieved via RAG; empty string when
                            RAG is unavailable.
     openapi_reference    — top-k chunks retrieved from the OpenAPI 3.0
@@ -34,32 +37,75 @@ from langchain_core.prompts import ChatPromptTemplate
 _SYSTEM = """\
 You are an expert in 3GPP technical specifications and OpenAPI 3.0 design.
 
-Your task is to produce a complete OpenAPI fragment for ONE operation
-(path + HTTP method). The fragment will be merged into a larger OpenAPI
-document by an Assembler node, so it MUST be self-contained and valid in
-isolation.
+Your task is to produce an OpenAPI fragment for ONE operation (path + HTTP
+method). An Assembler merges your fragment into a document that already
+exists, so two different things are in front of you and they must not be
+confused.
+
+  THE DOCUMENT SO FAR — everything written by the calls before yours. It is
+  there TO READ, never to copy. You do not return it, restate it, or repeat
+  any part of it. Read it to answer questions about what is already settled:
+  is this schema defined? is this parameter already on the path? what shape
+  did the operations before mine take?
+
+  YOUR FRAGMENT — what this one operation ADDS. Only that. Your fragment is
+  merged INTO the document: what you put under `paths` is merged into the
+  document's `paths`, and what you put under `components` is merged into the
+  document's `components`. So a copy of the document inside your fragment
+  does not land beside the original — it lands one level down, as a path
+  named `components` or a path named `get`, which is not a path at all and
+  breaks the document.
+
+  Returning nothing but the new operation is the correct outcome when the
+  document already holds everything else this operation needs.
 
 OUTPUT FORMAT (returned via structured output as OperationFragment):
   - path        : exact path template (must equal the target path).
   - method      : lowercase HTTP method (must equal the target method).
-  - paths       : a dict shaped as
+  - paths       : a dict with ONE key, the target path, shaped as
         {{ "<path>": {{ "<method>": <full OpenAPI operation object> }} }}
     The operation object includes summary, description, parameters,
     requestBody (when applicable), responses, security (when applicable),
     and operationId.
+
+    The only keys allowed in this dict are the target path, and inside it
+    the target method plus `parameters`. Anything else is a mistake with a
+    recognisable shape: `components` here becomes a path named "components",
+    and a bare `get` here becomes a path named "get". If you are about to
+    write a key that is not the target path, stop — it does not belong in
+    this field.
+
+    A PARAMETER GOES AT THE LEVEL ITS RULE ADDRESSES, AND ONLY THERE.
+    A rule targeting the PATH (`paths.<path>`) describes a parameter every
+    method shares, and it belongs beside the methods:
+        {{ "<path>": {{ "parameters": [...], "<method>": {{...}} }} }}
+    A rule targeting the OPERATION (`paths.<path>.<method>`) describes one
+    that method alone takes, and it goes inside that method's object.
+
+    Never both, and never twice. A parameter declared on the path is already
+    in force for every method under it, so repeating it inside an operation
+    adds nothing and shifts the positions of the parameters after it. You are
+    one call among several writing into the same document: before adding a
+    parameter to the path, check "The document so far" — an earlier call may
+    have written it already, and then there is nothing for you to add.
   - components  : a dict shaped as
         {{ "schemas": {{ "<SchemaName>": <JSON-Schema object>, ... }} }}
-    Define every schema the applicable rules below define — that is, each
-    schema named by a rule whose target is `components/schemas/<Name>` —
-    plus any further schema this operation references. A rule reaching you
-    means the Planner decided this schema belongs here, so define it even
+    holding ONLY the schemas THIS call defines for the first time.
+
+    Include a schema here when a rule given to you names it as its target
+    (`components/schemas/<Name>`), or when this operation references it and
+    the document does not define it yet. A rule reaching you means the
+    Planner decided this schema belongs in the document, so define it even
     when no operation references it: `components.schemas` is a sibling of
     `paths`, not an appendix to it, and a specification routinely declares a
     public type (an enumeration, for instance) that no operation happens to
     use. Omitting such a type loses it from the document entirely.
-    Define nothing beyond that: no schema without a rule, and none that
-    already exists in the document (see "Existing schemas" below) — for
-    those, use $ref instead of redefining.
+
+    Leave a schema out when the document already defines it — point a $ref
+    at it instead. Copying a definition the document already has is not
+    harmless duplication: it is how a whole `components` block ends up
+    nested under `paths`. This field is empty whenever the operation needs
+    no new schema, and empty is a perfectly good answer.
 
 ACTIONS — interpret the target_op.action:
   - 'create' — build the operation from scratch using ONLY the applicable
@@ -77,7 +123,8 @@ GROUNDING:
     output MUST be justified by one of the applicable rules OR by the
     legacy fragment (for 'update'/'keep'). Do not invent fields.
   - If a rule's `openapi_value` is "$ref: '#/components/schemas/<Name>'"
-    and `<Name>` is in "Existing schemas", reuse the ref without redefining.
+    and the document already defines `<Name>`, reuse the ref without
+    redefining.
   - Use the 3GPP RAG context (if provided) to disambiguate types and
     descriptions, NEVER as a source of brand-new constructs not implied by
     a rule.
@@ -165,9 +212,11 @@ rule according to its own type:
 {rule_type_guide}
 
 QUALITY GATES — do not output:
+  - Any key under `paths` other than the target path.
+  - A `components` key inside `paths`, at any depth.
   - Operations whose path or method disagrees with the target_op.
-  - Schemas you defined inline when the same name exists in
-    "Existing schemas".
+  - A schema the document already defines.
+  - A parameter the document already declares on this path.
   - Responses without a schema reference or inline schema.
   - Path parameters absent from the parameters list.
   - A local schema standing in for a type referenced from another spec file.
@@ -185,8 +234,10 @@ APPLICABLE RULES (each grounds part of this operation):
 LEGACY FRAGMENT (empty when action='create'):
 {legacy_fragment}
 
-EXISTING SCHEMAS (already in the document — reuse via $ref):
-{existing_schemas}
+THE DOCUMENT SO FAR — READ ONLY. This is what earlier calls already wrote.
+Consult it to see what is already defined; never copy any of it into your
+answer, and never return it back:
+{document_so_far}
 
 3GPP CONTEXT (optional supporting material from RAG; may be empty):
 {rag_context}
@@ -197,10 +248,14 @@ OPENAPI 3.0 REFERENCE CHUNKS (authoritative spec excerpts via RAG; may be empty)
 {correction_task}
 
 Produce the OperationFragment now. Remember:
+  - Return ONLY what this operation adds. The document above is context you
+    read, not content you return.
+  - `paths` holds exactly one key: the target path. No `components` inside it.
+  - `components` holds only schemas the document does not define yet; empty
+    is the right answer when it defines them all.
   - `path` and `method` MUST match the target exactly.
-  - Cover every applicable rule in the output — including a rule that defines
-    a schema no operation references; it still belongs under components.schemas.
-  - Do not redefine anything already in "Existing schemas".
+  - Cover every applicable rule — including one defining a schema no
+    operation references; it still belongs under components.schemas.
 """
 
 patcher_prompt = ChatPromptTemplate.from_messages([
@@ -211,21 +266,42 @@ patcher_prompt = ChatPromptTemplate.from_messages([
 
 # ── correction pass ───────────────────────────────────────────────────────
 # After every operation is assembled, the Reflector reviews the document and
-# the Validator turns what it confirmed into fixes. They all arrive together,
-# and one call applies them all: the document is edited, not generated again,
-# so what was already right survives untouched.
+# the Validator turns what it confirmed into fixes. They all arrive together
+# and one call applies them all, because some depend on each other — a schema
+# added and the $ref pointing at it.
+#
+# The call reads the whole document and returns only the blocks it corrected.
+# Returning the whole document is what this replaced: every untouched line a
+# model restates is a line it can quietly alter, and the cost grew with the
+# document until a round stopped fitting in its timeout and returned nothing
+# at all.
 
 _CORRECTION_SYSTEM = """\
 You are an expert in 3GPP technical specifications and OpenAPI 3.0 design.
 
-You are given a generated OpenAPI document and a list of fixes to apply to it.
-Return the corrected document.
+You are given the whole generated OpenAPI document and a list of fixes to
+apply to it.
 
-EDIT, DO NOT REWRITE. Everything not named by a fix must come back exactly as
-it was — same paths, same schemas, same wording, same order. You are not
-reviewing the document and not improving it: the review is finished, and
-anything the fixes do not mention has been accepted as it stands. Changing it
-would discard work already judged correct.
+READ ALL OF IT — the fixes are written against this document, and judging one
+means seeing what surrounds it: the schema a $ref points at, the responses a
+sibling operation declares, the conventions the rest of the document follows.
+The document below is your context, entire and unabridged.
+
+RETURN ONLY THE BLOCKS YOU CHANGED. What you return is merged back into that
+same document, block by block: a path item you return replaces that path
+item, a schema you return replaces that schema, and everything you leave out
+stays exactly as it is. So return the path items you touched — within each,
+only the methods you touched — and the schemas you changed or added. A fix
+touching one response means returning that one operation, not the path beside
+it and not the schemas below it.
+
+Leaving a part out is what protects it. A part you restate is a part you
+might restate differently, and the document already holds work that was
+reviewed and judged correct.
+
+You are not reviewing the document and not improving it. The review is
+finished, and anything the fixes do not mention has been accepted as it
+stands.
 
 Each fix names an action and a place:
   change — the place exists and is wrong. Make it what the instruction says.
@@ -236,28 +312,61 @@ Apply every fix. When one cannot be applied — the place is not where the fix
 says, or the instruction contradicts the document — leave that part untouched
 rather than guessing; a later round can revisit it.
 
+NAME EVERY REMOVAL IN `removed`, one dotted path per place taken out, naming
+exactly what went: `paths./x.put.responses.404` removes that response, not the
+operation holding it. Leaving something out of the blocks you return does NOT
+remove it — anything absent is kept as it was. This is deliberate, so that
+returning only the part you touched cannot silently delete the rest. A removal
+you do not name does not happen.
+
+Removal is the one action that destroys work, so weigh what a fix would cost
+against the problem it solves. Removing the place a fix names is right when the
+place is itself what is wrong. It is wrong when the problem sits inside
+something larger and the instruction points at the container: taking out an
+operation to correct one of its responses, or a schema to correct one of its
+properties, discards everything else that was right there — and a fix aimed at
+a leaf is about that leaf. When a removal would cost more than the problem is
+worth, do not perform it: record it in `skipped` with the reason, and say what
+the narrower place would have been.
+
 The rules and reference material below are the same ones the document was built
 from. Use them to write what a fix asks for, and follow the same conventions
 that govern the rest of the document: a $ref stands alone, an external $ref is
 copied verbatim, a composition keeps its two-member shape.
 
-Return the whole document, not a fragment and not a diff.
+Return the blocks you changed, and nothing else.
 """
 
 _CORRECTION_USER = """\
-DOCUMENT TO CORRECT:
+THE DOCUMENT AS IT STANDS — the complete OpenAPI built so far. This is the
+document the fixes below were written against, and the one your output is
+merged back into:
 {document_yaml}
 
-FIXES TO APPLY:
+FIXES TO APPLY — each names a place in the document above and what to do
+there:
 {fixes}
 
-RULES BEHIND THE DOCUMENT:
+THE RULES THE DOCUMENT WAS BUILT FROM — the 3GPP requirements behind it, for
+writing what a fix asks for:
 {applicable_rules}
 
-OPENAPI 3.0 REFERENCE (may be empty):
+OPENAPI 3.0 REFERENCE — excerpts of the OpenAPI specification itself (may be
+empty):
 {openapi_reference}
 
-Return the corrected document now.
+NOW APPLY THE FIXES AND OUTPUT THE CORRECTED BLOCKS — ONLY THOSE, NOTHING ELSE.
+A block is one path item or one schema. Output a block only if a fix changed
+it; output it corrected, complete and in full. Output NO block that no fix
+touched — not to confirm it, not to restate it, not for completeness. Those
+blocks already exist in the document and are kept exactly as they are.
+
+  - `paths`: only the path items you corrected, and within each only the
+    methods you corrected.
+  - `components`: only the schemas you corrected or added.
+  - `removed`: the dotted path of each place you took out.
+  - `applied` / `skipped`: which fixes you carried out, and which you did not
+    and why.
 """
 
 patcher_correction_prompt = ChatPromptTemplate.from_messages([
