@@ -75,23 +75,34 @@ RULE_TYPES: Dict[str, RuleTypeSpec] = {
     ),
     "path_parameter": RuleTypeSpec(
         source_name="parameter name (MnSVersion, id)",
-        destination="paths.<path>.parameters — applies to every method",
+        destination="paths.<path>.parameters, or the parameters of one operation",
         address="openapi_object is paths.<path>; openapi_field names the parameter",
         guidance=(
             "Always `in: path` and `required: true` — OpenAPI admits no optional "
-            "path parameter. The parameter name MUST match the {…} variable in "
-            "the path template exactly, and every variable in the path needs "
-            "one. Give it a `schema` (type string unless the rule says another)."
+            "path parameter. The name MUST match the {…} variable in the path "
+            "template exactly, and every variable in the path needs one. Give it "
+            "a `schema` (type string unless the rule says another). "
+            "OpenAPI allows it either in the path item's own `parameters`, shared "
+            "by every method, or inside one operation. Its rule names no method, "
+            "so put it in the path item — declared once, it serves them all — and "
+            "never repeat it inside an operation as well."
         ),
     ),
     "query_parameter": RuleTypeSpec(
         source_name="parameter name (scope, filter)",
-        destination="paths.<path>.parameters — applies to every method",
-        address="openapi_object is paths.<path>; openapi_field names the parameter",
+        destination="paths.<path>.<method>.parameters — that operation alone",
+        address=(
+            "openapi_object carries path and method (paths.<path>.<method>); "
+            "openapi_field names the parameter"
+        ),
         guidance=(
-            "`in: query`, and optional unless a rule states it is required. "
-            "Give it a `schema`; when the rule names a type defined in the "
-            "document, point at it with a $ref rather than restating it."
+            "`in: query`, and optional unless a rule states it is required. Give "
+            "it a `schema`; when the rule names a type defined in the document, "
+            "point at it with a $ref rather than restating it. "
+            "It belongs to the one operation its rule names, inside that "
+            "operation's `parameters`. Never in the path item: that would offer "
+            "the parameter on every method sharing the path, and a rule that "
+            "meant every method would have named each one."
         ),
     ),
     "schema_property": RuleTypeSpec(

@@ -5,9 +5,9 @@ Every rule in rules_bank is classified by rule_type into one of four
 group keys (see _rule_group_key; the taxonomy lives in
 schemas.rule_types.RULE_TYPES):
     op:<path>:<method>      — path_operation / request_body / response /
-                              callback (anchored on the operation that
-                              registers it)
-    path:<path>             — path_parameter / query_parameter
+                              query_parameter / callback (anchored on the
+                              operation that registers it)
+    path:<path>             — path_parameter
     schema:<SchemaName>     — schema_property
     security:<SchemeName>   — security_scheme
 
@@ -115,8 +115,8 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
       path_operation   IS operation name → paths.<path>, method in openapi_field
       request_body     IS operation name → paths.<path>.<method>.requestBody
       response         IS operation name → paths.<path>.<method>.responses
-      path_parameter   param name        → paths.<path>, applies to every method
-      query_parameter  param name        → paths.<path>, applies to every method
+      path_parameter   param name        → paths.<path>, shared by every method
+      query_parameter  param name        → paths.<path>.<method>, that one only
       schema_property  NRM attribute     → components.schemas.<Name>
       callback         notification name → callbacks of the operation that
                                            registers it
@@ -208,9 +208,20 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
             return f"op:{m.group(1)}:{m.group(2).lower()}"
         return None
 
-    # path_parameter / query_parameter: openapi_object is paths.<path>.
-    if rule_type in ("path_parameter", "query_parameter"):
-        # No method in the rules_bank for these → group per path.
+    # query_parameter: belongs to the one operation that accepts it, so its
+    # openapi_object carries the method — 'paths.<path>.<method>'. Routed to the
+    # path instead, Phase B would offer it on every method sharing that path.
+    # A bank predating that contract writes the path alone; there is no method to
+    # recover, so the rule falls back to the path and the old behaviour.
+    if rule_type == "query_parameter":
+        m = re.match(
+            rf"^(.+?)[./]({'|'.join(_HTTP_METHODS)})$", rest, flags=re.IGNORECASE
+        )
+        return f"op:{m.group(1)}:{m.group(2).lower()}" if m else f"path:{rest}"
+
+    # path_parameter: openapi_object is paths.<path>, with no method — the
+    # parameter is shared by every method under it.
+    if rule_type == "path_parameter":
         return f"path:{rest}"
 
     return None
