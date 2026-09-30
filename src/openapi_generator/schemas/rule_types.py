@@ -47,10 +47,14 @@ RULE_TYPES: Dict[str, RuleTypeSpec] = {
     "request_body": RuleTypeSpec(
         source_name="IS operation name",
         destination="paths.<path>.<method>.requestBody",
-        address="openapi_object carries path and method; openapi_field names the part",
+        address=(
+            "openapi_object carries path and method; openapi_field is 'content' "
+            "and openapi_value the media type"
+        ),
         guidance=(
-            "The payload the consumer sends. Emit `content` keyed by the media "
-            "type the rule names (application/json unless stated otherwise), "
+            "The payload the consumer sends. Such a rule names `content` as its "
+            "field and the media type as its value, so emit `content` keyed by "
+            "that media type (application/json unless the rule says otherwise), "
             "whose `schema` is a $ref to the named type — never an inline copy "
             "of a schema defined elsewhere. Mark it `required: true` unless a "
             "rule says the body is optional."
@@ -99,9 +103,11 @@ RULE_TYPES: Dict[str, RuleTypeSpec] = {
         ),
         guidance=(
             "openapi_field is either properties.<name> for a single property, or "
-            "a keyword — allOf, oneOf, anyOf, enum, required — describing the "
-            "schema as a whole. Rules sharing a schema and a keyword are merged "
-            "into one list, never emitted twice."
+            "a keyword describing the schema as a whole: allOf, oneOf, anyOf, "
+            "enum, required, items (the element type of an array), or "
+            "additionalProperties (the value type of an open map, or false to "
+            "close it). Rules sharing a schema and a keyword are merged into one "
+            "list, never emitted twice."
         ),
     ),
     "callback": RuleTypeSpec(
@@ -134,6 +140,13 @@ RULE_TYPES: Dict[str, RuleTypeSpec] = {
 }
 
 KNOWN_RULE_TYPES = frozenset(RULE_TYPES)
+
+# The HTTP methods a rules bank emits, and the ones openapi_rulesbank validates
+# against. OpenAPI also allows head, options and trace, but a rule naming one is
+# rejected upstream before it reaches the generator, so recognising them here
+# would only mean accepting what cannot arrive. Kept beside the rule taxonomy
+# because it is part of the same contract with the bank.
+HTTP_METHODS = ("get", "put", "post", "delete", "patch")
 
 
 def format_for_prompt(rule_types: Optional[List[str]] = None) -> str:
