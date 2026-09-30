@@ -11,6 +11,11 @@ from pydantic import BaseModel, Field
 
 Action = Literal["create", "update", "keep", "discard"]
 Priority = Literal["high", "medium", "low"]
+# The methods a rules bank emits — see schemas.rule_types.HTTP_METHODS, which
+# says why head, options and trace are left out. Spelled as a Literal here
+# because structured output shows a model the values it may return, and a model
+# offered a method the bank never emits will eventually return one.
+HttpMethod = Literal["get", "put", "post", "delete", "patch"]
 
 
 class TargetOperation(BaseModel):
@@ -29,7 +34,7 @@ class TargetOperation(BaseModel):
             "braces around path variables."
         )
     )
-    method: Literal["get", "put", "post", "delete", "patch", "head", "options"] = Field(
+    method: HttpMethod = Field(
         description="Lowercase HTTP method for this operation."
     )
     action: Action = Field(
@@ -344,7 +349,7 @@ class PlannerPass2Op(BaseModel):
         default="",
         description="Required when destination='new'; ignored otherwise.",
     )
-    method: Literal["get", "put", "post", "delete", "patch", "head", "options", ""] = Field(
+    method: Literal["get", "put", "post", "delete", "patch", ""] = Field(
         default="",
         description="Required when destination='new'; ignored otherwise.",
     )

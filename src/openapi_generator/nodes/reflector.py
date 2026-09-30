@@ -37,10 +37,11 @@ import yaml
 
 from openapi_generator.config import get_logger
 from openapi_generator.nodes.patcher import RULE_TYPE_GUIDE, _build_rules_block
+from openapi_generator.schemas.rule_types import HTTP_METHODS
 
 logger = get_logger(__name__)
 
-_HTTP_METHODS = ("get", "put", "post", "delete", "patch", "head", "options")
+_HTTP_METHODS = HTTP_METHODS
 
 # A local reference points inside this document; anything else names another
 # file and cannot be resolved from here.

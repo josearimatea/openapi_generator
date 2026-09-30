@@ -63,10 +63,9 @@ from openapi_generator.schemas.operation import (
     PlannerSchemaAttachment,
     TargetOperation,
 )
+from openapi_generator.schemas.rule_types import HTTP_METHODS as _HTTP_METHODS
 
 logger = get_logger(__name__)
-
-_HTTP_METHODS = ("get", "put", "post", "delete", "patch", "head", "options")
 
 
 # ── Deterministic helpers ────────────────────────────────────────────────────
@@ -175,7 +174,7 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
         # method sitting AFTER '.callbacks.' belongs to the callback itself and
         # must not be mistaken for it.
         tail = re.search(
-            r"^(.+)[./](get|put|post|delete|patch|head|options)$",
+            rf"^(.+)[./]({'|'.join(_HTTP_METHODS)})$",
             owner,
             flags=re.IGNORECASE,
         )
@@ -201,7 +200,7 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
         # sometimes writes the method in upper case (e.g. .../POST.responses)
         # — accept both cases and normalize to lower-case in the key.
         m = re.match(
-            r"^(.+?)[./](get|put|post|delete|patch|head|options)(?:[./]|$)",
+            rf"^(.+?)[./]({'|'.join(_HTTP_METHODS)})(?:[./]|$)",
             rest,
             flags=re.IGNORECASE,
         )
