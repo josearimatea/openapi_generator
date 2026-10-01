@@ -13,8 +13,8 @@ data/references/
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
-# Tracking / project logbook (personal, not versioned)
-docs/
+# (docs/ holds the project logbook and the open-problems list; both are
+# versioned, so a session can pick up where the last one left off.)
 
 # uv
 uv.lock
