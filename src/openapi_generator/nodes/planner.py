@@ -176,17 +176,19 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
         # method sitting AFTER '.callbacks.' belongs to the callback itself and
         # must not be mistaken for it.
         tail = re.search(
-            rf"^(.+)[./]({'|'.join(_HTTP_METHODS)})$",
+            rf"^(.+)\.({'|'.join(_HTTP_METHODS)})$",
             owner,
             flags=re.IGNORECASE,
         )
         if tail:
             return f"op:{tail.group(1)}:{tail.group(2).lower()}"
-        # Otherwise the owner is a bare path: take the method from
-        # openapi_field when it names one, else group by path so Phase B
-        # spreads the rule over every method of that path.
-        method = field.lower()
-        return f"op:{owner}:{method}" if method in _HTTP_METHODS else f"path:{owner}"
+        # The owner is a bare path, so the registering method was never stated.
+        # openapi_field holds the DELIVERY method — the one the producer calls
+        # the consumer back with — and the two differ: ProvMnS registers its
+        # notifications on PUT and delivers them by POST. Reading the field here
+        # would anchor the callback on an operation the rule never named, so the
+        # rule groups by path and Phase B spreads it over the methods there.
+        return f"path:{owner}"
 
     # path_operation: openapi_object is paths.<path>; method is in openapi_field.
     if rule_type == "path_operation":
@@ -202,6 +204,10 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
         # sometimes writes the method in upper case (e.g. .../POST.responses)
         # — accept both cases and normalize to lower-case in the key.
         m = re.match(
+            # A slash before the method is tolerated here, unlike for
+            # parameters: the method sits mid-chain, followed by .responses or
+            # .requestBody, so it cannot be mistaken for a trailing path
+            # segment. One bank writes '/POST.responses' that way.
             rf"^(.+?)[./]({'|'.join(_HTTP_METHODS)})(?:[./]|$)",
             rest,
             flags=re.IGNORECASE,
@@ -219,9 +225,12 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
     # that operation; naming the path alone, it is shared by every method under
     # it. A query parameter arrives with a method under the current contract
     # with the bank, which is what keeps it out of the path item.
+    # The method is separated by a dot, as the bank writes it. A slash would be
+    # a path segment: '/alarms/get' is a resource called get, not the GET of
+    # /alarms, and reading it as a method would silently drop the segment.
     if rule_type in ("path_parameter", "query_parameter"):
         m = re.match(
-            rf"^(.+?)[./]({'|'.join(_HTTP_METHODS)})$", rest, flags=re.IGNORECASE
+            rf"^(.+?)\.({'|'.join(_HTTP_METHODS)})$", rest, flags=re.IGNORECASE
         )
         return f"op:{m.group(1)}:{m.group(2).lower()}" if m else f"path:{rest}"
 

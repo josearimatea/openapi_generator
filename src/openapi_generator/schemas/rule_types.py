@@ -76,7 +76,10 @@ RULE_TYPES: Dict[str, RuleTypeSpec] = {
     "path_parameter": RuleTypeSpec(
         source_name="parameter name (MnSVersion, id)",
         destination="paths.<path>.parameters, or one operation's — see guidance",
-        address="openapi_object is paths.<path>; openapi_field names the parameter",
+        address=(
+            "openapi_object is paths.<path>, or paths.<path>.<method> when the "
+            "parameter belongs to one operation; openapi_field names it"
+        ),
         guidance=(
             "Always `in: path` and `required: true` — OpenAPI admits no optional "
             "path parameter. The name MUST match the {…} variable in the path "
@@ -126,9 +129,9 @@ RULE_TYPES: Dict[str, RuleTypeSpec] = {
         source_name="notification name (notifyMOICreation)",
         destination="paths.<path>.<method>.callbacks.<name>",
         address=(
-            "openapi_object may hold the whole callback chain "
-            "(paths.<path>.<method>.callbacks.<name>…), or only the registering "
-            "path with the method in openapi_field"
+            "openapi_object holds the callback chain, registering method "
+            "included: paths.<path>.<method>.callbacks.<name>…; openapi_field "
+            "is the DELIVERY method, which is a different thing"
         ),
         guidance=(
             "An out-of-band notification the producer sends back to the "
