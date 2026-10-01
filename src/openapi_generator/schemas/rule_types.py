@@ -75,7 +75,7 @@ RULE_TYPES: Dict[str, RuleTypeSpec] = {
     ),
     "path_parameter": RuleTypeSpec(
         source_name="parameter name (MnSVersion, id)",
-        destination="paths.<path>.parameters, or the parameters of one operation",
+        destination="paths.<path>.parameters, or one operation's — see guidance",
         address="openapi_object is paths.<path>; openapi_field names the parameter",
         guidance=(
             "Always `in: path` and `required: true` — OpenAPI admits no optional "
@@ -83,9 +83,10 @@ RULE_TYPES: Dict[str, RuleTypeSpec] = {
             "template exactly, and every variable in the path needs one. Give it "
             "a `schema` (type string unless the rule says another). "
             "OpenAPI allows it either in the path item's own `parameters`, shared "
-            "by every method, or inside one operation. Its rule names no method, "
-            "so put it in the path item — declared once, it serves them all — and "
-            "never repeat it inside an operation as well."
+            "by every method, or inside one operation, and prefers neither. Let "
+            "the rule decide: naming a method, it belongs to that operation; "
+            "naming the path alone, to the path item, where one declaration "
+            "serves every method. Either way declare it once — never in both."
         ),
     ),
     "query_parameter": RuleTypeSpec(

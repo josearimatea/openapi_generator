@@ -7,7 +7,8 @@ schemas.rule_types.RULE_TYPES):
     op:<path>:<method>      — path_operation / request_body / response /
                               query_parameter / callback (anchored on the
                               operation that registers it)
-    path:<path>             — path_parameter
+    path:<path>             — path_parameter or query_parameter whose
+                              address names no method
     schema:<SchemaName>     — schema_property
     security:<SchemeName>   — security_scheme
 
@@ -115,7 +116,8 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
       path_operation   IS operation name → paths.<path>, method in openapi_field
       request_body     IS operation name → paths.<path>.<method>.requestBody
       response         IS operation name → paths.<path>.<method>.responses
-      path_parameter   param name        → paths.<path>, shared by every method
+      path_parameter   param name        → paths.<path>, or one method's, as
+                                           the rule's address says
       query_parameter  param name        → paths.<path>.<method>, that one only
       schema_property  NRM attribute     → components.schemas.<Name>
       callback         notification name → callbacks of the operation that
@@ -208,21 +210,20 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
             return f"op:{m.group(1)}:{m.group(2).lower()}"
         return None
 
-    # query_parameter: belongs to the one operation that accepts it, so its
-    # openapi_object carries the method — 'paths.<path>.<method>'. Routed to the
-    # path instead, Phase B would offer it on every method sharing that path.
-    # A bank predating that contract writes the path alone; there is no method to
-    # recover, so the rule falls back to the path and the old behaviour.
-    if rule_type == "query_parameter":
+    # Parameters go where their own address puts them. OpenAPI allows either
+    # level and prefers neither, and the published specifications disagree:
+    # ProvMnS declares its path parameters once in the path item, while
+    # StreamingDataMnS repeats one across the three methods of a path. Neither
+    # is the form to copy, so the choice is not guessed from the target — the
+    # rule's openapi_object decides. Naming a method, the parameter belongs to
+    # that operation; naming the path alone, it is shared by every method under
+    # it. A query parameter arrives with a method under the current contract
+    # with the bank, which is what keeps it out of the path item.
+    if rule_type in ("path_parameter", "query_parameter"):
         m = re.match(
             rf"^(.+?)[./]({'|'.join(_HTTP_METHODS)})$", rest, flags=re.IGNORECASE
         )
         return f"op:{m.group(1)}:{m.group(2).lower()}" if m else f"path:{rest}"
-
-    # path_parameter: openapi_object is paths.<path>, with no method — the
-    # parameter is shared by every method under it.
-    if rule_type == "path_parameter":
-        return f"path:{rest}"
 
     return None
 
