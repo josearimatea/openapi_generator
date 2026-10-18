@@ -61,8 +61,12 @@ QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "3gpp_rel18_28")
 OPENAPI_COLLECTION_NAME = os.getenv("OPENAPI_COLLECTION_NAME", "openapi_reference")
 
 # ── Embeddings ────────────────────────────────────────────────────
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384
+# From qdrant_3gpp_rag, the single source for every repository: queries must use
+# the model the shared collections were built with. (A light module: no torch.)
+from qdrant_3gpp_rag.embedding_config import (  # noqa: E402
+    DEFAULT_EMBEDDING_DIM as EMBEDDING_DIM,
+    DEFAULT_EMBEDDING_MODEL as EMBEDDING_MODEL,
+)
 
 # ── Retrieval ─────────────────────────────────────────────────────
 DEFAULT_RETRIEVE_K = 5

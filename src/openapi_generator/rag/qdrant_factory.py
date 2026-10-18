@@ -1,8 +1,13 @@
 """
-Factory for HuggingFace embeddings + QdrantVectorStore.
+Access to Qdrant through qdrant_3gpp_rag, the package every repository shares.
 
-Lazy: the embedder and the Qdrant client are constructed on first use and
-cached, so importing this module does not touch the network or load torch.
+The client, the embedding model and the vector stores all come from its
+QdrantFactory, so the generator embeds queries with the model the shared
+collections were built with, and searches them hybrid (dense + BM25) when they
+hold the sparse vector.
+
+Lazy: the factory is built on first use and cached, so importing this module
+does not touch the network or load torch.
 """
 
 from functools import lru_cache
@@ -22,37 +27,31 @@ logger = get_logger(__name__)
 
 
 @lru_cache(maxsize=1)
-def _get_qdrant_client() -> Any:
-    from qdrant_client import QdrantClient
-
-    logger.info(f"Connecting to Qdrant at {QDRANT_HOST}:{QDRANT_PORT}")
-    return QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=QDRANT_TIMEOUT)
-
-
-@lru_cache(maxsize=1)
-def _get_embeddings() -> Any:
-    from langchain_huggingface import HuggingFaceEmbeddings
+def get_factory() -> Any:
+    """The shared QdrantFactory for this process (client + embeddings)."""
+    from qdrant_3gpp_rag import QdrantFactory
 
     device = get_device()
-    logger.info(f"Loading embeddings: {EMBEDDING_MODEL} on {device}")
-    return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True},
+    logger.info(f"Connecting to Qdrant at {QDRANT_HOST}:{QDRANT_PORT}; "
+                f"embeddings: {EMBEDDING_MODEL} on {device}")
+    return QdrantFactory.get_instance(
+        host=QDRANT_HOST, port=QDRANT_PORT, timeout=QDRANT_TIMEOUT,
+        model_name=EMBEDDING_MODEL, device=device,
     )
+
+
+def _get_qdrant_client() -> Any:
+    return get_factory().client
+
+
+def _get_embeddings() -> Any:
+    return get_factory().embeddings
 
 
 def get_vector_store(collection_name: str = QDRANT_COLLECTION) -> Any:
-    """Build a QdrantVectorStore bound to the given collection."""
-    from langchain_qdrant import QdrantVectorStore
-
-    return QdrantVectorStore(
-        client=_get_qdrant_client(),
-        collection_name=collection_name,
-        embedding=_get_embeddings(),
-        vector_name="text-dense",
-        sparse_vector_name="text-sparse",
-    )
+    """A QdrantVectorStore bound to the given collection — hybrid when the
+    collection holds the sparse vector, dense-only otherwise."""
+    return get_factory().get_vector_store(collection_name)
 
 
 def collection_available(collection_name: str = QDRANT_COLLECTION) -> bool:

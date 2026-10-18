@@ -5,52 +5,27 @@ Read-only consumer: the collection (OPENAPI_COLLECTION_NAME) is populated
 externally — typically by openapi_rulesbank.tools.rag_tools.index_openapi_reference().
 This module only queries it.
 
-Same embedding model and vector layout as the 3GPP RAG (dense "text-dense",
-all-MiniLM-L6-v2, dim=384, cosine), so the two collections share infrastructure
-but stay isolated by name.
+Opened through the shared QdrantFactory (rag.qdrant_factory), like the 3GPP
+collections: same embedding model, hybrid search when the collection holds the
+sparse vector; the collections stay isolated by name.
 """
 
-from functools import lru_cache
-
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient
-
 from openapi_generator.config import get_logger
-from openapi_generator.config.hardware import get_device
 from openapi_generator.config.settings import (
-    EMBEDDING_MODEL,
     OPENAPI_COLLECTION_NAME,
     OPENAPI_REFERENCE_RETRIEVE_CHUNKS,
-    QDRANT_HOST,
-    QDRANT_PORT,
-    QDRANT_TIMEOUT,
 )
+from openapi_generator.rag.qdrant_factory import _get_qdrant_client, get_vector_store
 
 logger = get_logger(__name__)
 
 
-@lru_cache(maxsize=1)
-def _get_client() -> QdrantClient:
-    return QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=QDRANT_TIMEOUT)
+def _get_client():
+    return _get_qdrant_client()
 
 
-@lru_cache(maxsize=1)
-def _get_embeddings() -> HuggingFaceEmbeddings:
-    return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
-        model_kwargs={"device": get_device()},
-        encode_kwargs={"normalize_embeddings": True},
-    )
-
-
-def _get_vector_store() -> QdrantVectorStore:
-    return QdrantVectorStore(
-        client=_get_client(),
-        collection_name=OPENAPI_COLLECTION_NAME,
-        embedding=_get_embeddings(),
-        vector_name="text-dense",
-    )
+def _get_vector_store():
+    return get_vector_store(OPENAPI_COLLECTION_NAME)
 
 
 def search_openapi_reference(

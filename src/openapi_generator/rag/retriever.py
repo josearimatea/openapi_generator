@@ -9,10 +9,10 @@ Design:
                            release/series/spec.
       * no filters       → plain vector similarity over the whole collection.
 
-Both modes go through the QdrantVectorStore.similarity_search API directly
-— no LLM-driven SelfQueryRetriever, no langchain.retrievers dependency
-(that module was reorganised in langchain >= 1.0 and is no longer stable
-across versions).
+Both modes go through qdrant_3gpp_rag.retrieve, the search every repository
+shares: hybrid (dense + BM25) when the collection holds the sparse vector, and
+filter keys resolved against the payload's "metadata." prefix. No LLM-driven
+SelfQuery here (llm is never passed).
 
 The Retriever protocol below is what build_openapi_gen_graph(retriever=...)
 accepts when callers want to plug a different vector store entirely.
@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Protocol
 
 from openapi_generator.config import get_logger
 from openapi_generator.config.settings import DEFAULT_RETRIEVE_K, QDRANT_COLLECTION
-from openapi_generator.rag.qdrant_factory import collection_available, get_vector_store
+from openapi_generator.rag.qdrant_factory import collection_available, get_factory
 
 logger = get_logger(__name__)
 
@@ -49,18 +49,6 @@ def _format_doc(doc: Any) -> str:
     return header + (doc.page_content or "").strip()
 
 
-def _build_qdrant_filter(filters: Dict[str, Any]) -> Any:
-    """Convert a {key: value} dict into a Qdrant Filter with must-match terms."""
-    from qdrant_client.http.models import FieldCondition, Filter, MatchValue
-
-    return Filter(
-        must=[
-            FieldCondition(key=key, match=MatchValue(value=value))
-            for key, value in filters.items()
-        ]
-    )
-
-
 def get_relevant_chunks(
     query: str,
     k: int = DEFAULT_RETRIEVE_K,
@@ -85,14 +73,12 @@ def get_relevant_chunks(
         return []
 
     try:
-        vector_store = get_vector_store()
-        if filters:
-            qdrant_filter = _build_qdrant_filter(filters)
-            docs = vector_store.similarity_search(
-                query=query, k=k, filter=qdrant_filter
-            )
-        else:
-            docs = vector_store.similarity_search(query=query, k=k)
+        from qdrant_3gpp_rag import retrieve
+
+        docs = retrieve(
+            query, factory=get_factory(), collection_name=QDRANT_COLLECTION,
+            k=k, filters=filters or None,
+        ).docs
     except Exception as e:
         logger.warning(f"RAG query failed ({type(e).__name__}: {e}) — returning []")
         return []

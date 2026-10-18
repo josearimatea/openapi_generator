@@ -39,27 +39,15 @@ from openapi_generator.config.settings import (
     SPEC_COLLECTION_PREFIX,
     SPEC_RETRIEVE_CHUNKS,
 )
-from openapi_generator.rag.qdrant_factory import _get_embeddings, _get_qdrant_client
+from openapi_generator.rag.qdrant_factory import _get_qdrant_client, get_factory
 
 logger = get_logger(__name__)
 
 
 def _store(collection_name: str) -> Any:
-    """A vector store bound to one of this run's collections.
-
-    Built here rather than through `get_vector_store` because that one also
-    declares a sparse vector, which the permanent collections happen to
-    tolerate. These collections are created a few lines above with a dense
-    vector only, so they are opened the same way.
-    """
-    from langchain_qdrant import QdrantVectorStore
-
-    return QdrantVectorStore(
-        client=_get_qdrant_client(),
-        collection_name=collection_name,
-        embedding=_get_embeddings(),
-        vector_name="text-dense",
-    )
+    """A vector store bound to one of this run's collections, dense-only: they
+    are created below with a dense vector only."""
+    return get_factory().get_vector_store(collection_name, sparse_vector_name=None)
 
 
 def index_spec_sections(sections: List[Dict[str, Any]]) -> str:
