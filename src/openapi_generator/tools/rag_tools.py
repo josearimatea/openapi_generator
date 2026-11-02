@@ -15,17 +15,13 @@ from openapi_generator.config.settings import (
     OPENAPI_COLLECTION_NAME,
     OPENAPI_REFERENCE_RETRIEVE_CHUNKS,
 )
-from openapi_generator.rag.qdrant_factory import _get_qdrant_client, get_vector_store
+from openapi_generator.rag.qdrant_factory import _get_qdrant_client, get_factory
 
 logger = get_logger(__name__)
 
 
 def _get_client():
     return _get_qdrant_client()
-
-
-def _get_vector_store():
-    return get_vector_store(OPENAPI_COLLECTION_NAME)
 
 
 def search_openapi_reference(
@@ -46,7 +42,10 @@ def search_openapi_reference(
                 "before running the Patcher."
             )
             return ""
-        docs = _get_vector_store().similarity_search(query, k=k)
+        from qdrant_3gpp_rag import retrieve
+
+        docs = retrieve(query, factory=get_factory(),
+                        collection_name=OPENAPI_COLLECTION_NAME, k=k).docs
     except Exception as e:
         logger.warning(f"OpenAPI reference RAG failed ({type(e).__name__}: {e}) — returning ''")
         return ""
