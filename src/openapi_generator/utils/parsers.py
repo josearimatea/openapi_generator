@@ -1,9 +1,10 @@
 """
 Parsing utilities for 3GPP specification markdown documents.
 
-Splitting strategy mirrors openapi_rulesbank/utils/parsers.py so both
-packages process the same spec the same way (section_id values line up
-across them).
+The cut is qdrant_3gpp_rag's split_sections (unstyled_titles=True), the same
+one openapi_rulesbank and the shared corpus use, so every repo reads the same
+sections from the same spec (one rule for headings and for clause titles the
+document left as plain text; see qdrant_3gpp_rag/spec_sections.py).
 
 Unlike the rulesbank version, this module does NOT filter sections by
 keyword: the generator iterates the rules from rules_bank rule-by-rule
@@ -13,6 +14,8 @@ cover-page table borders (titles made entirely of '+', '-', '=').
 """
 
 import re
+
+from qdrant_3gpp_rag.spec_sections import split_sections
 
 from openapi_generator.config.settings import FILTER_SYMBOLIC_TITLES
 
@@ -70,11 +73,11 @@ def parse_sections(md_text: str) -> tuple[list[dict], list[dict]]:
     """Split a Markdown document into kept and excluded sections.
 
     Strategy:
-        1. Split the document on '## '. Because '### ', '#### ', '##### '
-           all share that prefix, this captures every header from level 2
-           onward. 3GPP specs typically start at level 3, so this is
-           intentional.
-        2. First line of each chunk is the section title; rest is the body.
+        1. Cut the document with qdrant_3gpp_rag's split_sections: every heading
+           level, ATX and setext, pandoc {#attrs} removed from the title, and the
+           clause titles the document left as plain text (unstyled_titles=True).
+        2. The text before the first heading, if any, is excluded as
+           "front_matter".
         3. If FILTER_SYMBOLIC_TITLES is True (default), discard sections
            whose title contains no real words — these are 3GPP cover-page
            table borders, not real sections.
@@ -83,17 +86,21 @@ def parse_sections(md_text: str) -> tuple[list[dict], list[dict]]:
         (kept, excluded), each a list of dicts:
           kept:     {"section_id": str, "title": str, "content": str}
           excluded: {"section_id": str, "title": str,
-                     "reason": "symbolic_title"}
+                     "reason": "front_matter" | "symbolic_title"}
     """
-    raw_sections = [s.strip() for s in md_text.split("## ") if s.strip()]
-
     sections: list[dict] = []
     excluded: list[dict] = []
 
-    for i, section in enumerate(raw_sections):
-        lines = section.splitlines()
-        title = lines[0].strip()
-        content = "\n".join(lines[1:]).strip()
+    for i, sec in enumerate(split_sections(md_text, unstyled_titles=True)):
+        title, content = sec.title, sec.body
+
+        if not sec.heading:
+            excluded.append({
+                "section_id": str(i),
+                "title": title,
+                "reason": "front_matter",
+            })
+            continue
 
         if FILTER_SYMBOLIC_TITLES and not _has_real_words(title):
             excluded.append({
