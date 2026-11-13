@@ -52,6 +52,7 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from openapi_generator.config import get_logger
+from openapi_generator.utils.structured import invoke_structured
 from openapi_generator.prompts.planner_prompts import (
     pass1_prompt,
     pass2_prompt,
@@ -431,13 +432,13 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         oa_ref = _openapi_rag(query) or "(no OpenAPI reference context)"
 
         try:
-            verdict: PlannerPass1Verdict = pass1_chain.invoke({
+            verdict: PlannerPass1Verdict = invoke_structured(pass1_chain, {
                 "op_label": op_label,
                 "legacy_fragment": _legacy_fragment_yaml(legacy, path, method),
                 "candidate_rules": _format_candidates(rules, candidate_idx),
                 "spec_rag": spec_rag,
                 "openapi_reference": oa_ref,
-            })
+            }, "Planner Pass 1")
         except Exception as e:
             logger.error(f"Planner Pass 1 → LLM failed for {op_label}: {e}", exc_info=True)
             # Conservative fallback: keep the legacy op untouched.
@@ -509,13 +510,13 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         oa_ref = _openapi_rag(query) or "(no OpenAPI reference context)"
 
         try:
-            verdict: PlannerPass2Op = pass2_chain.invoke({
+            verdict: PlannerPass2Op = invoke_structured(pass2_chain, {
                 "op_label": op_label,
                 "grouped_rules": _format_candidates(rules, idx_list),
                 "existing_plan": _format_existing_plan(operations),
                 "spec_rag": spec_rag,
                 "openapi_reference": oa_ref,
-            })
+            }, "Planner Phase A")
         except Exception as e:
             logger.error(f"Planner Phase A → LLM failed for {op_label}: {e}", exc_info=True)
             verdict = PlannerPass2Op(
@@ -620,12 +621,12 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
     for schema_name, idx_list in schema_groups.items():
         oa_ref = _openapi_rag(schema_name) or "(no OpenAPI reference context)"
         try:
-            attach: PlannerSchemaAttachment = schema_chain.invoke({
+            attach: PlannerSchemaAttachment = invoke_structured(schema_chain, {
                 "schema_name": schema_name,
                 "schema_rules": _format_candidates(rules, idx_list),
                 "existing_plan": _format_existing_plan(operations, rules),
                 "openapi_reference": oa_ref,
-            })
+            }, "Planner Phase C")
         except Exception as e:
             logger.error(f"Planner Phase C → LLM failed for schema={schema_name}: {e}", exc_info=True)
             attach = PlannerSchemaAttachment(attach_to_indices=[], rationale="LLM fallback")

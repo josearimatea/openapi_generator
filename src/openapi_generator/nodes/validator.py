@@ -23,6 +23,7 @@ from typing import Any, Dict, List
 import yaml
 
 from openapi_generator.config import get_logger
+from openapi_generator.utils.structured import invoke_structured
 
 logger = get_logger(__name__)
 
@@ -91,14 +92,14 @@ def validator_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         chain = validator_prompt | llm.with_structured_output(
             ValidatorVerdict, method="function_calling"
         )
-        verdict: ValidatorVerdict = chain.invoke({
+        verdict: ValidatorVerdict = invoke_structured(chain, {
             "document_yaml": _document_yaml(document),
             "confirmed_problems": _format_problems(problems),
             "unapplied_rules": _format_list(reflection.get("unapplied_rule_ids") or []),
             "ungrounded": _format_list(reflection.get("ungrounded") or []),
             "reflector_summary": reflection.get("summary") or "(none)",
             "openapi_reference": reference or "(no OpenAPI reference)",
-        })
+        }, "Validator")
     except Exception as e:
         logger.error(f"Validator → LLM call failed: {e}", exc_info=True)
         # Without fixes there is nothing the Patcher could act on, and looping

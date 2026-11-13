@@ -57,6 +57,7 @@ from openapi_generator.prompts.patcher_prompts import patcher_prompt
 from openapi_generator.schemas.operation import OperationFragment
 from openapi_generator.schemas.rule_types import format_for_prompt
 from openapi_generator.utils.parsers import normative_only
+from openapi_generator.utils.structured import invoke_structured
 
 logger = get_logger(__name__)
 
@@ -362,11 +363,11 @@ def _decide_servers(
         chain = patcher_servers_prompt | llm.with_structured_output(
             PatcherServerDecision, method="function_calling"
         )
-        decision: PatcherServerDecision = chain.invoke({
+        decision: PatcherServerDecision = invoke_structured(chain, {
             "document_paths": ", ".join(document_paths) or "(none yet)",
             "uri_clauses": uri_clauses(spec_text, document_paths, spec_collection),
             "rag_context": rag_context or "(no 3GPP RAG context)",
-        })
+        }, "servers pass")
     except Exception as e:
         logger.error(f"Patcher → servers pass failed: {e}", exc_info=True)
         return [placeholder_servers(
@@ -456,27 +457,18 @@ def _apply_corrections(state: dict, llm, retriever) -> Dict[str, Any]:
         chain = patcher_correction_prompt | llm.with_structured_output(
             PatcherCorrectedDocument, method="function_calling"
         )
-        corrected: PatcherCorrectedDocument = chain.invoke({
+        corrected: PatcherCorrectedDocument = invoke_structured(chain, {
             "document_yaml": yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
             "fixes": fixes_block,
             "applicable_rules": rules_block,
             "openapi_reference": reference or "(no OpenAPI reference)",
-        })
+        }, "correction pass")
     except Exception as e:
+        # Includes an answer that did not parse (invoke_structured raises on
+        # None). Leave the document as it was; the round is spent either way,
+        # and the budget in graph.conditions stops the loop. A round is cheap to
+        # lose; the document this run has been building is not.
         logger.error(f"Patcher → correction pass failed: {e}", exc_info=True)
-        # Leave the document as it was; the round is spent either way, and the
-        # budget in graph.conditions stops the loop.
-        return {"op_iteration_count": iteration + 1, "validation_errors": []}
-
-    # A structured-output call can return None instead of raising — the model
-    # answered, but not in a shape that parsed. That reads as success and is
-    # not one, so it is checked rather than dereferenced. A round is cheap to
-    # lose; the document this run has been building is not.
-    if corrected is None:
-        logger.error(
-            "Patcher → the correction pass returned nothing that parsed; "
-            "leaving the document as it was and spending the round."
-        )
         return {"op_iteration_count": iteration + 1, "validation_errors": []}
 
     # Take what came back key by key rather than swapping the blocks whole. The
@@ -694,7 +686,7 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
     )
     chain = patcher_prompt | structured_llm
     try:
-        fragment: OperationFragment = chain.invoke({
+        fragment: OperationFragment = invoke_structured(chain, {
             "target_op_summary": target_op_summary,
             "applicable_rules": applicable_rules,
             "legacy_fragment": legacy_fragment or "(no legacy fragment — building from scratch)",
@@ -703,7 +695,7 @@ def patcher_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
             "rag_context": rag_context or "(3GPP RAG unavailable for this run)",
             "openapi_reference": openapi_reference or "(OpenAPI reference RAG unavailable for this run)",
             "correction_task": correction_task,
-        })
+        }, "Patcher")
     except Exception as e:
         logger.error(f"Patcher → LLM call failed: {e}", exc_info=True)
         return {

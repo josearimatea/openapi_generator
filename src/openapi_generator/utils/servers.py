@@ -48,6 +48,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from openapi_generator.config import get_logger
+from openapi_generator.utils.structured import invoke_structured
 
 logger = get_logger(__name__)
 
@@ -213,11 +214,11 @@ def document_metadata(
         chain = loader_metadata_prompt | llm.with_structured_output(
             LoaderDocumentMetadata, method="function_calling"
         )
-        read: LoaderDocumentMetadata = chain.invoke({
+        read: LoaderDocumentMetadata = invoke_structured(chain, {
             "cover_page": cover,
             "target": target or "(none given)",
             "service_mentions": _service_mentions(target, spec_collection) or "(none)",
-        })
+        }, "cover-page pass")
     except Exception as e:
         logger.warning(f"cover-page pass failed ({type(e).__name__}: {e})")
         return {}

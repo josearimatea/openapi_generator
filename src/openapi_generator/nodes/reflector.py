@@ -36,6 +36,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import yaml
 
 from openapi_generator.config import get_logger
+from openapi_generator.utils.structured import invoke_structured
 from openapi_generator.nodes.patcher import RULE_TYPE_GUIDE, _build_rules_block
 from openapi_generator.schemas.rule_types import HTTP_METHODS
 
@@ -457,7 +458,7 @@ def reflector_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         kept = op_context.get(f"{method} {path}") or {}
 
         try:
-            review: ReflectorReview = chain.invoke({
+            review: ReflectorReview = invoke_structured(chain, {
                 "operation": f"{method.upper()} {path}",
                 "document_yaml": part,
                 "rules_by_operation": op_rules,
@@ -468,7 +469,7 @@ def reflector_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
                 "rag_context": kept.get("rag_context") or spec_context or "(no 3GPP context)",
                 "openapi_reference": kept.get("openapi_reference") or reference
                 or "(no OpenAPI reference)",
-            })
+            }, "Reflector first pass")
             found = [issue.model_dump() for issue in review.issues]
             first.extend(found)
             if not found:
@@ -483,7 +484,7 @@ def reflector_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
     unreviewed = _unreviewed_yaml(document, covered, reviewed_ops)
     if unreviewed:
         try:
-            review = chain.invoke({
+            review = invoke_structured(chain, {
                 "operation": "parts of the document no operation pass covered",
                 "document_yaml": unreviewed,
                 "rules_by_operation": rules_block,
@@ -499,7 +500,7 @@ def reflector_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
                 ]),
                 "rag_context": spec_context or "(no 3GPP context)",
                 "openapi_reference": reference or "(no OpenAPI reference)",
-            })
+            }, "Reflector uncovered pass")
             found = [issue.model_dump() for issue in review.issues]
             first.extend(found)
             logger.info(
@@ -516,7 +517,7 @@ def reflector_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         chain = reflector_document_prompt | llm.with_structured_output(
             ReflectorReview, method="function_calling"
         )
-        final: ReflectorReview = chain.invoke({
+        final: ReflectorReview = invoke_structured(chain, {
             "document_yaml": document_yaml,
             "rules_by_operation": rules_block,
             "rule_type_guide": RULE_TYPE_GUIDE,
@@ -525,7 +526,7 @@ def reflector_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
             "cleared_parts": "\n".join(f"  - {p}" for p in cleared) or "(none)",
             "rag_context": spec_context or "(no 3GPP context)",
             "openapi_reference": reference or "(no OpenAPI reference)",
-        })
+        }, "Reflector second pass")
     except Exception as e:
         logger.error(f"Reflector → second pass failed: {e}", exc_info=True)
         # Without the confirming pass, the unweighed findings are all there is.
