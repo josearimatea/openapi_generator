@@ -9,7 +9,7 @@ and corrects the finished whole.
                               └────────────────┴──────────────────┘
                                                │ every operation merged
                                                ▼
-                              ┌───────── [reflector] → [validator] → END
+                              ┌───────── [reflector] → [validator] → [finish] → END
                               │              ▲              │
                               └── corrections┘              │ fixes to apply
                                   applied in place ─────────┘
@@ -33,6 +33,10 @@ Dependency injection (all optional):
     openapi_generator.rag.retriever.Retriever. None → nodes fall back to
     get_relevant_chunks (which itself degrades to [] if Qdrant/collection
     is unavailable).
+
+The Finish node drops the Qdrant collection the Loader created for this run's
+specification. It is part of the graph rather than of the CLI so that every
+host that builds the graph — not only `main` — leaves nothing behind.
 
 Every node accepts (state, llm=None, retriever=None) so the build function
 can inject the same dependency pair uniformly. Nodes that don't need a
@@ -61,6 +65,20 @@ from openapi_generator.nodes.validator import validator_node
 logger = get_logger(__name__)
 
 
+def finish_node(state: dict, llm=None, retriever=None) -> dict:
+    """Drop this run's specification collection; the document is final.
+
+    The Loader indexes the specification into a collection that lasts one run.
+    Dropping it only in the CLI's `finally` left one behind for every run of a
+    host that builds the graph directly. A run that raises never reaches this
+    node, and nothing drops its collection yet (PROBLEMS P23).
+    """
+    from openapi_generator.rag.spec_index import drop_spec_collection
+
+    drop_spec_collection(state.get("spec_collection", ""))
+    return {"spec_collection": ""}
+
+
 def build_openapi_gen_graph(
     checkpointer: Optional[Any] = None,
     llm: Optional[Any] = None,
@@ -83,6 +101,7 @@ def build_openapi_gen_graph(
     graph.add_node("reflector", partial(reflector_node, llm=llm, retriever=retriever))
     graph.add_node("validator", partial(validator_node, llm=llm, retriever=retriever))
     graph.add_node("assembler", partial(assembler_node, llm=llm, retriever=retriever))
+    graph.add_node("finish",    partial(finish_node,    llm=llm, retriever=retriever))
 
     graph.set_entry_point("loader")
 
@@ -124,9 +143,10 @@ def build_openapi_gen_graph(
         should_retry_op_or_assemble,
         {
             "retry": "patcher",
-            "assemble": END,
+            "assemble": "finish",
         },
     )
+    graph.add_edge("finish", END)
 
     if checkpointer is not None:
         return graph.compile(checkpointer=checkpointer)

@@ -186,10 +186,11 @@ def main() -> None:
         logger.error(f"Pipeline failed: {e}", exc_info=True)
         raise
     finally:
-        # The Loader indexes this specification into a collection of its own.
-        # Dropped here rather than in a node because the nodes run per
-        # operation and none of them is the end of the run — and in `finally`
-        # so a failed run leaves nothing behind either.
+        # The Loader indexes this specification into a collection of its own,
+        # and the graph's Finish node drops it at the end of a run. This is a
+        # second attempt, harmless when the node already did it. It does NOT
+        # cover a run that raised: `invoke` then returns nothing, `result`
+        # stays empty and the collection's name is unknown here (PROBLEMS P23).
         from openapi_generator.rag.spec_index import drop_spec_collection
         drop_spec_collection(result.get("spec_collection", ""))
 

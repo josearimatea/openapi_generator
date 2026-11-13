@@ -28,13 +28,20 @@ from openapi_generator.utils.structured import invoke_structured
 logger = get_logger(__name__)
 
 
-def _document_yaml(document: Dict[str, Any], limit: int = 24000) -> str:
+def _document_yaml(document: Dict[str, Any]) -> str:
+    """The whole document, as the fixes will be written against it.
+
+    Not truncated, for the reason the Reflector's second pass is not: a fix
+    names a place in the document, and a Validator shown only the first N
+    characters writes fixes blind to the tail — or none at all for problems
+    that sit there. It used to cut at 24 000 characters, after the Reflector
+    had stopped doing so; the ProvMnS document of 20/Sep had 26 756.
+    """
     try:
-        text = yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+        return yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
     except Exception as e:
         logger.warning(f"Validator → could not serialise the document: {e}")
         return "(the document could not be serialised)"
-    return text if len(text) <= limit else text[:limit] + f"\n… truncated at {limit} characters"
 
 
 def _format_problems(problems: List[Dict[str, Any]]) -> str:

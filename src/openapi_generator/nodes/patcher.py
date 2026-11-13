@@ -285,6 +285,49 @@ def _strip_ref_siblings(node: Any, _at: str = "") -> List[str]:
     return cleaned
 
 
+# The model's report on its own correction work (PatcherCorrectedDocument's
+# applied / skipped / removed). Not OpenAPI, so it must never reach the document.
+_REPORT_KEYS = frozenset({"applied", "skipped", "removed"})
+
+# OpenAPI maps whose keys are NAMES chosen by the document — a path, a property,
+# a schema, a status code, a media type — rather than fixed field names. A key
+# there is content even when it is spelled like a report key: a schema may well
+# have a property called `removed`.
+_NAME_MAPS = frozenset({
+    "paths", "properties", "patternProperties", "schemas", "parameters",
+    "requestBodies", "responses", "headers", "content", "encoding", "examples",
+    "links", "callbacks", "securitySchemes", "variables", "mapping",
+})
+
+
+def _strip_report_keys(node: Any, _at: str = "", names: bool = False) -> List[str]:
+    """Drop the model's report keys wherever they sit, in place. Returns the
+    dotted paths dropped.
+
+    The structured output invites the model to nest its report inside the
+    blocks it returns rather than beside them — `applied` turned up under
+    `put.callbacks`, `skipped` under `put` (P10). Filtering only the first
+    level let those through to the published YAML, so the whole tree is
+    walked. `names` marks a dict whose keys are names (see _NAME_MAPS); those
+    keys are content and are never dropped.
+    """
+    dropped: List[str] = []
+    if isinstance(node, dict):
+        for key in list(node):
+            here = f"{_at}.{key}" if _at else str(key)
+            if not names and key in _REPORT_KEYS:
+                node.pop(key)
+                dropped.append(here)
+                continue
+            dropped.extend(_strip_report_keys(
+                node[key], here, names=not names and key in _NAME_MAPS
+            ))
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            dropped.extend(_strip_report_keys(value, f"{_at}[{i}]"))
+    return dropped
+
+
 # Signals in a rule → the OpenAPI 3.0 section that governs what it produces.
 # Keys are the reference document's own headings, which is what the collection
 # is indexed on.
@@ -493,24 +536,22 @@ def _apply_corrections(state: dict, llm, retriever) -> Dict[str, Any]:
             else:
                 into[key] = value
 
-    # `applied` and `skipped` are the model's report on its own work, and the
-    # structured output invites it to nest them inside the blocks it returns
-    # rather than beside them. They are not OpenAPI and must not reach the
-    # document, so they are stripped wherever they turn up.
-    def content_only(block: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            k: v for k, v in block.items()
-            if k not in ("applied", "skipped", "removed")
-        }
-
-    if corrected.paths:
-        merge(updated.setdefault("paths", {}), content_only(corrected.paths), "paths")
-    if corrected.components:
-        merge(
-            updated.setdefault("components", {}),
-            content_only(corrected.components),
-            "components",
+    returned_paths = copy.deepcopy(corrected.paths or {})
+    returned_components = copy.deepcopy(corrected.components or {})
+    stripped = (
+        _strip_report_keys(returned_paths, "paths", names=True)
+        + _strip_report_keys(returned_components, "components")
+    )
+    if stripped:
+        logger.warning(
+            "Patcher → the correction nested its own report inside the blocks it "
+            f"returned; dropped {len(stripped)} key(s): {', '.join(stripped)}"
         )
+
+    if returned_paths:
+        merge(updated.setdefault("paths", {}), returned_paths, "paths")
+    if returned_components:
+        merge(updated.setdefault("components", {}), returned_components, "components")
 
     # Carry out the removals the model declared — and only those. A dotted path
     # is walked segment by segment down to the parent, and the last segment is
