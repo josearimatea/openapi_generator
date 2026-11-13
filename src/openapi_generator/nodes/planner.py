@@ -38,7 +38,9 @@ State reads : rules_bank, legacy_openapi, parsed_spec_sections (unused, kept
               for state symmetry).
 State writes: operations_plan (List[TargetOperation] as dicts),
               current_op_idx=0,
-              extraction_plan (ExtractionPlan dump for debug).
+              extraction_plan (ExtractionPlan dump, probable_gaps included),
+              final_openapi (only when rules went unplaced: the list goes into
+              x-ai-generation.unplaced-rules).
 
 LLM/Retriever injection:
     llm        — passed via build_openapi_gen_graph(llm=...); falls back to
@@ -238,6 +240,24 @@ def _rule_group_key(rule: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _same_path(a: str, b: str) -> bool:
+    """Whether two path templates name the same path.
+
+    Equal, or equal once a leading prefix is set aside — a plan entry may carry
+    a server prefix the rule's address does not ('/{MnSRoot}/ProvMnS/v1/x'
+    against '/x'). Never a path nested under the other: '/alarms' and
+    '/alarms/{alarmId}' are different paths, and a substring test used to treat
+    them as one, handing the nested path's parameters to the parent's
+    operations.
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    longer, shorter = (a, b) if len(a) > len(b) else (b, a)
+    return shorter.startswith("/") and longer.endswith(shorter)
+
+
 def _legacy_schemas_referenced_by(legacy: Optional[Dict[str, Any]], path: str, method: str) -> Set[str]:
     """Schema names a legacy fragment references via $ref."""
     if not legacy:
@@ -257,16 +277,22 @@ def _rule_touches_op(
 
     Uses rule_type to know whether the rule has a method, just a path, or only
     a schema name — and matches accordingly.
+
+    Paths are compared with _same_path, never by substring. A substring test
+    made '/alarms' match a rule
+    about '/alarms/{alarmId}', handing one path's parameters to another path's
+    operations — invisible on a service with a single path, wrong on any with
+    nested ones.
     """
     key = _rule_group_key(rule)
     if key is None:
         return False
     if key.startswith("op:"):
         _, key_path, key_method = key.split(":", 2)
-        return path in key_path and method == key_method
+        return _same_path(path, key_path) and method == key_method
     if key.startswith("path:"):
         _, key_path = key.split(":", 1)
-        return path in key_path  # path-level params apply to every method
+        return _same_path(path, key_path)  # path-level params apply to every method
     if key.startswith("schema:"):
         _, schema_name = key.split(":", 1)
         return schema_name in schema_refs
@@ -563,10 +589,12 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
 
     # ── PHASE B — path-level rules: attach to every op of the same path ─────
     for raw_path, idx_list in path_groups.items():
-        # Path stored in keys may carry server prefix; match by substring.
+        # The same path, whole. A substring match handed a nested path's
+        # parameters to its parent's operations ('/alarms/{alarmId}' →
+        # '/alarms'), which have no such variable.
         targets = [
             j for j, op in enumerate(operations)
-            if op.path in raw_path or raw_path in op.path
+            if _same_path(op.path, raw_path)
         ]
         if not targets:
             logger.warning(
@@ -710,8 +738,32 @@ def planner_node(state: dict, llm=None, retriever=None) -> Dict[str, Any]:
         f"gaps: {len(gaps)}"
     )
 
-    return {
+    out: Dict[str, Any] = {
         "operations_plan": ops_dict,
         "current_op_idx": 0,
         "extraction_plan": plan.model_dump(),
     }
+    document = _with_unplaced_rules(state.get("final_openapi"), gaps)
+    if document is not None:
+        out["final_openapi"] = document
+    return out
+
+
+def _with_unplaced_rules(
+    final_openapi: Optional[Dict[str, Any]], gaps: List[str]
+) -> Optional[Dict[str, Any]]:
+    """The document with the Planner's unplaced rules recorded in it, or None
+    when there is nothing to record.
+
+    A rule the Planner places on no operation never reaches the Patcher, and
+    the run reports success all the same. A count in the log was the only
+    trace, so the list goes into the document's generation block, where
+    whoever reads the YAML also learns what it was not built from.
+    """
+    if not gaps or not isinstance(final_openapi, dict):
+        return None
+    document = dict(final_openapi)
+    generation = dict(document.get("x-ai-generation") or {})
+    generation["unplaced-rules"] = list(gaps)
+    document["x-ai-generation"] = generation
+    return document

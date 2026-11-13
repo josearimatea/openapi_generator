@@ -54,6 +54,11 @@ class OpenAPIGenState(TypedDict, total=False):
     #     "priority": "high" | "medium" | "low",
     #   }
     operations_plan: List[Dict[str, Any]]
+    # The whole ExtractionPlan dump, probable_gaps included: the rules the
+    # Planner could not place on any operation. Declared because LangGraph
+    # drops any update key the state does not declare — this one used to
+    # vanish, and with it the only record of the rules lost before generation.
+    extraction_plan: Dict[str, Any]
 
     # ── Per-operation loop control ────────────────────────────
     current_op_idx: int
