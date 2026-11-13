@@ -7,9 +7,9 @@ de forma que sirva como matéria-prima para a escrita da dissertação mais adia
 pretende ser documentação técnica (isso está no README, no NODES.md e no código);
 pretende contar a *história* das decisões.
 
-Ele não é versionado (a pasta `docs/` está no `.gitignore`), justamente por ser um
-registro pessoal e em evolução. A cada mudança relevante, acrescente um parágrafo novo
-em vez de reescrever o que já está aqui.
+É versionado desde o commit `c16ce9b`; antes a pasta `docs/` ficava no `.gitignore`,
+por ser um registro pessoal e em evolução. A cada mudança relevante, acrescente um
+parágrafo novo em vez de reescrever o que já está aqui.
 
 Registro de atualizações:
 - 2026-08-19 — correção da Phase C, achado do `requestBody` inferido.
@@ -26,6 +26,12 @@ Registro de atualizações:
   converge pela primeira vez.
 - 2026-10-01 — seis divergências entre o rulesbank e o gerador, fechadas do lado do
   gerador; o nível dos parâmetros passa a ser decidido pelo endereço da regra.
+- 2026-10-06 — P10: o `openapi_analysis` acha relatório do Patcher e schemas vazando
+  para o YAML de 20/set 19:41 (registrado só no `PROBLEMS.md`).
+- 2026-11-08 — o corte do documento passa a ser o do `qdrant_3gpp_rag`; seis mudanças
+  do banco a conferir aqui (P11–P16).
+- 2026-11-10 — leitura do código inteiro contra os documentos, e alinhamento com as
+  decisões do rulesbank até o run de 09/nov.
 
 ---
 
@@ -1117,3 +1123,50 @@ a regeração do ProvMnS entra na próxima rodada ou se espera.
 
 Falta ainda um tipo de regra para parâmetros `header`, que o StreamingDataMnS usa e que a
 taxonomia dos oito tipos não cobre.
+
+## 08/nov/2026 — o que veio do rulesbank e falta conferir aqui
+
+O corte do documento passou a ser o `split_sections` do `qdrant_3gpp_rag` (commit `b2afeb7`), o mesmo do
+rulesbank e do corpus: na i20 entram os 7 títulos sem estilo e os de nível 1, e o texto deixa de levar o `#`
+solto. Não foi rodado aqui depois disso.
+
+Do lado do banco, seis mudanças mudam o que o gerador recebe; estão em `PROBLEMS.md`, P11–P16, para conferir
+com o próximo banco da ProvMnS: `style`/`explode` no valor do `query_parameter`; o mapa do `Resource` como
+`additionalProperties`; o `required` só com o que é sempre presente; o corpo de erro sem código em `default`;
+a chave do callback pelo campo `notificationRecipientAddress`; e o campo novo `metadata.unresolved_missing`.
+
+## 10/nov/2026 — o código lido contra os documentos, e o banco que mudou por baixo
+
+Desde 20/09 nada foi executado aqui. Em vez de rodar, li o código inteiro contra o
+`PROBLEMS.md` e este caderno, e depois contra o que o rulesbank decidiu desde então. As
+duas leituras deram resultados de natureza diferente.
+
+**O que o código mostra.** O P10 estava como "não diagnosticado", e a causa está à
+vista: o filtro do relatório do modelo só olha o primeiro nível do bloco devolvido, e
+nenhum merge confere a forma do que entra. O P4 foi fechado em 20/set pelo prompt, não
+por código. Uma execução limpa não provava que o caminho estava fechado; a nota de 19/set
+sobre contadores já avisava isso, e a regressão de 19:41 confirmou. Dois achados repetem
+consertos registrados como feitos: o Validator ainda trunca o documento em 24 mil
+caracteres, como o Reflector truncava, e a proteção contra a resposta estruturada `None`
+só existe na chamada onde o erro apareceu. É o padrão que já se viu com a lista de
+métodos HTTP em 01/out: o conserto vai para o lugar onde o defeito apareceu, não para
+todo lugar que tem a mesma forma. Há ainda dois defeitos que só aparecem fora da ProvMnS
+(paths casados por substring, chave de callback com ponto) e uma terceira forma de perda
+silenciosa: o `probable_gaps` do Planner é descartado pelo LangGraph, porque a chave não
+está declarada no estado. Registrados como P10 (causa) e P17–P25.
+
+**O que o rulesbank mudou.** A errata de 07/nov, a cascata de nome de arquivo de 19/out
+e os consertos de 08/nov resolveram do lado do banco parte do que este caderno tratava
+como limite do gerador. O R1 está resolvido: os query params vêm endereçados à operação.
+O P7 encolheu: o banco de 09/nov traz o `$ref` externo pronto para os tipos comuns, e os
+que faltam ele **declara** em `rules_never_completed`. Esse campo é a informação negativa
+que o P7 pedia. A fonte do P9 sumiu, e o 4XX/5XX deixou de ser "convenção" e virou um
+critério por operação (D.10). Em troca, o banco novo traz defeitos próprios que vão
+aparecer no YAML (R3). O mais enganoso é o N.35, parâmetros de path repetidos no DELETE:
+vai parecer a volta de um defeito daqui já resolvido, e a origem é a regra.
+
+A lição é a da seção de 01/out, vista de outro ângulo: o contrato entre os dois
+repositórios muda dos dois lados, e um diagnóstico daqui envelhece quando o banco muda.
+Antes do próximo run, o `PROBLEMS.md` foi alinhado ao `04_Problems_ProvMnS.txt` de lá,
+para que cada defeito do YAML seja atribuído ao lado certo.
+
